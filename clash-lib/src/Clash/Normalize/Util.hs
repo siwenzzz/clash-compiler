@@ -36,7 +36,7 @@ module Clash.Normalize.Util
 import           Control.Lens            ((&),(+~),(%=),(.=))
 import qualified Control.Lens            as Lens
 import           Data.Bifunctor          (bimap)
-import           Data.Either             (lefts)
+import           Data.Either             (lefts,rights)
 import qualified Data.List               as List
 import qualified Data.Map                as Map
 import qualified Data.HashMap.Strict     as HashMapS
@@ -52,21 +52,21 @@ import           Clash.Core.FreeVars
 import           Clash.Core.Name         (Name(nameOcc,nameUniq))
 import           Clash.Core.Pretty       (showPpr)
 import           Clash.Core.Subst
-  (deShadowTerm, extendTvSubst, extendTvSubstList, mkSubst, substTm, substTy,
+  (deShadowTerm, extendTvSubst, mkSubst, substTm, substTy,
    substId, extendIdSubst)
 import           Clash.Core.Term
   (Context, CoreContext(AppArg), PrimInfo (..), Term (..), WorkInfo (..),
    TickInfo(NameMod), NameMod(PrefixName), collectArgs, collectArgsTicks)
 import           Clash.Core.TyCon        (TyConMap)
 import           Clash.Core.Type
-  (Type(LitTy, VarTy), LitTy(SymTy), TypeView (..), tyView, undefinedTy,
-   splitFunForallTy, splitTyConAppM, mkPolyFunTy)
+  (Type(ForAllTy,LitTy, VarTy), LitTy(SymTy), TypeView (..), tyView, undefinedTy,
+   splitTyConAppM, mkPolyFunTy)
 import           Clash.Core.Util
-  (isClockOrReset, isPolyFun, termType, mkApps, mkTicks)
+  (isClockOrReset, isPolyFun, termType, mkAbstraction, mkApps, mkTicks)
 import           Clash.Core.Var          (Id, TyVar, Var (..), isGlobalId)
 import           Clash.Core.VarEnv
   (VarEnv, emptyInScopeSet, emptyVarEnv, extendVarEnv, extendVarEnvWith,
-   lookupVarEnv, unionVarEnvWith, unitVarEnv, extendInScopeSetList)
+   lookupVarEnv, unionVarEnvWith, unitVarEnv, extendInScopeSetList, mkInScopeSet, mkVarSet)
 import           Clash.Driver.Types      (BindingMap, Binding(..), DebugLevel (..))
 import {-# SOURCE #-} Clash.Normalize.Strategy (normalization)
 import           Clash.Normalize.Types
@@ -431,30 +431,27 @@ normalizeTopLvlBndr isTop nm (Binding nm' sp inl tm) = makeCachedU nm (extra.nor
 substWithTyEq
   :: Term
   -> Term
-substWithTyEq e0 = go [] False [] e0
+substWithTyEq e0 = go [] False e0
  where
   go
-    :: [TyVar]
+    :: [Either Id TyVar]
     -> Bool
-    -> [Id]
     -> Term
     -> Term
-  go tvs changed ids_ (TyLam tv e) = go (tv:tvs) changed ids_ e
-  go tvs changed ids_ (Lam v e)
+  go args changed (TyLam tv e) = go (Right tv : args) changed e
+  go args changed (Lam v e)
     | TyConApp (nameUniq -> tcUniq) (tvFirst -> Just (tv, ty)) <- tyView (varType v)
     , tcUniq == getKey eqTyConKey
-    , tv `elem` tvs
+    , Right tv `elem` args
     = let
-        subst0 = extendTvSubst (mkSubst emptyInScopeSet) tv ty
-        subst1 = extendIdSubst subst0 v (removedTm (varType v))
-      in go (tvs List.\\ [tv]) True (substId subst0 v : ids_) (substTm "substWithTyEq e" subst1 e)
-    | otherwise = go tvs changed (v:ids_) e
-  go tvs True ids_ e =
-    let
-      e1 = List.foldl' (flip TyLam) e tvs
-      e2 = List.foldl' (flip Lam) e1 ids_
-    in e2
-  go _ False _ _ = e0
+        tvs = rights args
+        subst0 = extendTvSubst (mkSubst $ mkInScopeSet $ mkVarSet tvs) tv ty
+        removedTy = substTy subst0 $ varType v
+        subst1 = extendIdSubst subst0 v (removedTm removedTy)
+      in go (Left (substId subst0 v) : (args List.\\ [Right tv])) True (substTm "substWithTyEq e" subst1 e)
+    | otherwise = go (Left v : args) changed e
+  go args True e = mkAbstraction e (reverse args)
+  go _ False _ = e0
 
 -- Type equality (~) is symmetrical, so users could write: (dom ~ System) or (System ~ dom)
 tvFirst :: [Type] -> Maybe (TyVar, Type)
@@ -466,25 +463,22 @@ tvFirst _ = Nothing
 tvSubstWithTyEq
   :: Type
   -> Type
-tvSubstWithTyEq ty0 = go [] args0
+tvSubstWithTyEq ty0 = go [] False ty0
  where
-  (args0,tyRes) = splitFunForallTy ty0
-
-  go :: [(TyVar,Type)] -> [Either TyVar Type] -> Type
-  go eqs (Right arg : args)
+  go :: [Either TyVar Type] -> Bool -> Type -> Type
+  go argsOut changed (ForAllTy tv ty)
+    = go (Left tv:argsOut) changed ty
+  go argsOut changed (tyView -> FunTy arg tyRes)
     | Just (tc,tcArgs) <- splitTyConAppM arg
     , nameUniq tc == getKey eqTyConKey
-    , Just eq <- tvFirst tcArgs
-    = go (eq:eqs) args
-    | otherwise = go eqs args
-  go eqs (Left _tv : args)
-    = go eqs args -- drop (ForAll) tv
-  go []  [] = ty0 -- no eq constraints, returning original type
-  go eqs [] = substTy subst ty2
-   where
-     subst = extendTvSubstList (mkSubst emptyInScopeSet) eqs
-     args2 = args0 List.\\ (map (Left . fst) eqs)
-     ty2 = mkPolyFunTy tyRes args2
+    , Just (tv,ty) <- tvFirst tcArgs
+    = let
+        subst = extendTvSubst (mkSubst $ mkInScopeSet $ mkVarSet $ lefts argsOut2) tv ty
+        argsOut2 = Right arg : (argsOut List.\\ [Left tv])
+      in go argsOut2 True  (substTy subst tyRes)
+    | otherwise = go (Right arg : argsOut) changed tyRes
+  go _ False _ = ty0 -- no eq constraints, returning original type
+  go argsOut True tyRes = mkPolyFunTy tyRes (reverse argsOut)
 
 -- | Rewrite a term according to the provided transformation
 rewriteExpr :: (String,NormRewrite) -- ^ Transformation to apply
