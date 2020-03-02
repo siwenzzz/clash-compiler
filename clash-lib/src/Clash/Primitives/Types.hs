@@ -138,6 +138,10 @@ data UsedArguments
   -- ^ All but these are used
   deriving (Show, Generic, Hashable, NFData, Binary)
 
+
+--type ResolvedPrimitive        = Primitive Text ((TemplateFormat,BlackBoxFunctionName),Maybe Text) () (Maybe Text)
+
+
 -- | Externally defined primitive
 data Primitive a b c d
   -- | Primitive template written in a Clash specific templating language

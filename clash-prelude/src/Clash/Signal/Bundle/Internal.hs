@@ -102,7 +102,7 @@ deriveBundleTuples bundleTyName unbundledTyName bundleName unbundleName = do
             [ ValD
                 (TupP (map VarP asNames))
                 (NormalB (
-                  tNm `seqXE` (sNm `seqE` (VarE unbundlePrimName `AppE` VarE sTailNm)))) []]
+                  {-tNm `seqXE` (sNm `seqE` -} (VarE unbundlePrimName `AppE` VarE sTailNm)){-)-}) []]
             (TupE
               (zipWith
                 (\a as -> UInfixE (VarE a) (ConE '(:-)) (VarE as))

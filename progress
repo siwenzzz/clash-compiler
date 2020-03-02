@@ -1,0 +1,11 @@
+echo -n 'Lines: '
+
+total=13981 left=$(find . | grep json | xargs cat | wc -l); python3 -c "print('{0:.02f}'.format((($total - $left)/$total.0)*100).zfill(5), end='')"
+
+echo "% ($(echo $total - $left | bc) / $total)"
+echo -n 'Files: '
+
+total=132 left=$(find . | egrep 'json$' | wc -l); python3 -c "print('{0:.02f}'.format((($total - $left)/$total.0)*100).zfill(5), end='')"
+
+
+echo "% ($(echo $total - $left | bc) / $total)"
