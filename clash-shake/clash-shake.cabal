@@ -21,6 +21,8 @@ source-repository head
   subdir: clash-shake
 
 common common-options
+  ghc-options:        -Wall -Wcompat
+  CPP-Options:        -DCABAL
   default-language:   Haskell2010
   default-extensions: BangPatterns
                       BinaryLiterals
@@ -46,29 +48,43 @@ common common-options
       default-extensions: NoStarIsType
 
 
-Library
+library
   import:             common-options
   HS-Source-Dirs:     src
-
-  ghc-options:        -Wall
-  CPP-Options:        -DCABAL
 
   Build-depends:      base >= 4.10 && < 5,
                       bytestring >= 0.10.0.2 && < 0.11,
                       clash-ghc == 1.3.0,
                       clash-lib,
                       clash-prelude,
+                      cabal-plan >= 0.6.2 && < 0.7,
                       containers >= 0.5.11.0  && < 0.7,
                       directory >= 1.3 && < 1.4,
+                      exceptions,
                       mtl >= 2.2 && < 2.3,
                       mustache >= 2.3 && < 2.4,
+                      path >= 0.7 && < 0.8,
                       shake >= 0.18 && < 0.19,
+                      template-haskell,
                       text >= 1.2 && < 1.3,
+                      text-show,
                       unordered-containers >= 0.2.3.3 && < 0.3
 
   Autogen-Modules:    Paths_clash_shake
 
   Exposed-modules:    Clash.Shake
+                      Clash.Shake.Cabal
+                      Clash.Shake.Example
 
   Other-modules:      Paths_clash_shake
 
+executable go
+  import:             common-options
+  Main-Is:            bin/Main.hs
+  Build-Depends:      base,
+                      cabal-plan,
+                      clash-shake,
+                      containers,
+                      hashable,
+                      template-haskell,
+                      text

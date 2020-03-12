@@ -1,352 +1,132 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE PartialTypeSignatures #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
 
-module Clash.Shake
-    ( ClashProject(..)
-    , HDL(..)
-    , clashShake
-    , ClashKit(..)
-    , clashRules
-    , XilinxTarget(..), papilioPro, papilioOne, nexysA750T
-    , xilinxISE
-    , xilinxVivado
-    , hexImage
-    ) where
+module Clash.Shake where
 
-import           Development.Shake
-  (CmdOption(Cwd), (<//>), (%>), shakeFiles, alwaysRerun, need, phony,
-   putNormal, removeFilesAfter, cmd_, readFile', getDirectoryFiles,
-   writeFileChanged, copyFileChanged, shakeArgs, shakeOptions, want)
-import qualified Development.Shake as Shake
-import           Development.Shake.Config
-  (getConfig, usingConfigFile, readConfigFile, usingConfig)
-import           Development.Shake.FilePath
-  ((</>), (<.>), joinPath, splitPath, takeBaseName, makeRelative)
+import qualified Path as Path
+import           Path (Path)
+import           Path ((</>))
+import           Control.Monad.Catch (MonadThrow)
+import qualified Cabal.Plan as Plan
+import           Clash.Util (concatMapM)
+import qualified Data.Text as Text
+import qualified Data.Map.Strict as Map
+import           Data.Maybe (catMaybes)
+import qualified Data.Set as Set
+import           Data.Set (Set)
+import qualified Language.Haskell.TH as TH
+import           TextShow (showt)
 
+--import qualified Clash.Util.Interpolate as I
+--import qualified Language.Haskell.TH.Syntax as TH
+import Debug.Trace
 
-import           Control.Monad.Trans
+-- | See GHC User's Guide for more information:
+-- https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/packages.html
+data Dependency
+  = PackageEnv FilePath
+  -- ^ Corresponds to '-package-env envFile' on commandline
+  | PackageDb (Path Path.Abs Path.Dir)
+  -- ^ Corresponds to '-package-db pkgDb' on commandline
+  | Package Plan.UnitId
+  -- ^ Corresponds to '-package pkg' on commandline
+  deriving (Show, Eq, Ord)
 
-import           Text.Mustache ((~>), object)
-import qualified Text.Mustache as Mustache
-import qualified Text.Mustache.Types as Mustache
+data DependencyLocation
+  = CabalPlan Plan.SearchPlanJson
+  -- ^ Load dependencies from a plan.json file, usually located in
+  -- "dist-newstyle/cache/plan.json" right after using Cabal 3.0's build.
+  deriving (Show)
 
-import qualified Data.Text as T
-import qualified Data.HashMap.Strict as HM
-import           Data.Maybe (fromMaybe)
-import           Data.Char (toLower)
-import           Control.Monad.Reader
-import qualified Data.ByteString as BS
-import qualified System.Directory as Dir
-
-import           Clash.Driver.Types
-import           Clash.Prelude (pack)
-
-data HDL
-    = VHDL
-    | Verilog
-    | SystemVerilog
-    deriving (Eq, Enum, Bounded, Show, Read)
-
-hdlDir :: HDL -> FilePath
-hdlDir VHDL = "vhdl"
-hdlDir Verilog = "verilog"
-hdlDir SystemVerilog = "systemverilog"
-
-hdlExt :: HDL -> FilePath
-hdlExt VHDL = "vhdl"
-hdlExt Verilog = "v"
-hdlExt SystemVerilog = "sv"
-
-data XilinxTarget = XilinxTarget
-    { targetFamily :: String
-    , targetDevice :: String
-    , targetPackage :: String
-    , targetSpeed :: String
-    }
-
-targetMustache :: XilinxTarget -> [Mustache.Pair]
-targetMustache XilinxTarget{..} =
-    [ "targetFamily" ~> T.pack targetFamily
-    , "targetDevice" ~> T.pack targetDevice
-    , "targetPackage" ~> T.pack targetPackage
-    , "targetSpeed" ~> T.pack targetSpeed
-    , "part" ~> T.pack (targetDevice <> targetPackage <> targetSpeed)
-    ]
-
-papilioPro :: XilinxTarget
-papilioPro = XilinxTarget "Spartan6" "xc6slx9" "tqg144" "-2"
-
-papilioOne :: XilinxTarget
-papilioOne = XilinxTarget "Spartan3E" "xc3s500e" "vq100" "-5"
-
-nexysA750T :: XilinxTarget
-nexysA750T = XilinxTarget "Artrix7" "xc7a50t" "icsg324" "-1L"
+data CompileTarget
+  = Precompiled TH.Name
+  deriving (Show)
 
 data ClashProject = ClashProject
-    { projectName :: String
-    , clashModule :: String
-    , clashTopName :: String
-    , topName :: String
-    , clashFlags :: [String]
-    , shakeDir :: FilePath
-    , buildDir :: FilePath
-    , clashDir :: FilePath
-    }
+  { cpTarget :: CompileTarget
+  -- ^ Name of top entity to compile. Example: 'myTopEntity'.
+  , cpDependencies :: Maybe DependencyLocation
+  -- ^ How to load dependencies. If left Nothing, Clash will only load entities
+  -- from the global package db.
+  } deriving (Show)
 
-type ClashRules = ReaderT ClashProject Shake.Rules
+emptyClashProject :: CompileTarget -> ClashProject
+emptyClashProject ct = ClashProject {cpTarget=ct, cpDependencies=Nothing}
 
-data ClashKit = ClashKit
-    { clash :: String -> [String] -> Shake.Action ()
-    , manifestSrcs :: Shake.Action [FilePath]
-    }
+dependencyToFlag :: Dependency -> Text.Text
+dependencyToFlag (PackageEnv t) = "package-env " <> Text.pack t
+dependencyToFlag (PackageDb db) = "package-db " <> Text.pack (Path.fromAbsDir db)
+dependencyToFlag (Package (Plan.UnitId t)) = "package-id " <> t
 
-clashRules :: HDL -> FilePath -> Shake.Action () -> ClashRules ClashKit
-clashRules hdl srcDir extraGenerated = do
-    ClashProject{..} <- ask
-    let synDir = buildDir </> clashDir
-        rootDir = joinPath . map (const "..") . splitPath $ buildDir
-        srcDir' = rootDir </> srcDir
+buildGhcEnvironmentFile :: Set Dependency -> Text.Text
+buildGhcEnvironmentFile deps =
+  let flags = map dependencyToFlag (Set.toList deps) in
+  Text.intercalate "\n" ("clear-package-db" : "global-package-db" : flags)
 
-    let clash cmd args = do
-            clashExe <- fromMaybe ("stack exec --") <$> getConfig "CLASH"
-            Shake.cmd_ (Cwd buildDir) clashExe
-              ([cmd, "-i" <> srcDir', "-outputdir", clashDir] <> clashFlags <> args)
+-- Format PkgId as "ghc-8.2.2"
+formatPkgId :: Plan.PkgId -> Text.Text
+formatPkgId (Plan.PkgId (Plan.PkgName pkgName) (Plan.Ver version)) =
+  pkgName <> "-" <> Text.intercalate "." (map showt version)
 
-    let manifest = synDir </> hdlDir hdl </> clashModule </> clashTopName </> clashTopName <.> "manifest"
-        manifestSrcs = do
-            Shake.need [manifest]
-            Manifest{..} <- read <$> readFile' manifest
-            let clashSrcs = map T.unpack componentNames <>
-                            [ map toLower clashTopName <> "_types" | hdl == VHDL ]
-            return [ synDir </> hdlDir hdl </> clashModule </> clashTopName </> c <.> hdlExt hdl | c <- clashSrcs ]
+-- |
+resolveDependencies :: DependencyLocation -> IO (Set Dependency)
+resolveDependencies (CabalPlan searchPlan) = do
+  planPath0 <- Plan.findPlanJson searchPlan
+  plan <- Plan.decodePlanJson planPath0
 
-    lift $ do
-      synDir </> hdlDir hdl <//> "*.manifest" %> \_out -> do
-          let src = srcDir </> clashModule <.> "hs" -- TODO
-          alwaysRerun
-          need [ src ]
-          extraGenerated
-          clash "clash" [case hdl of { VHDL -> "--vhdl"; Verilog -> "--verilog"; SystemVerilog -> "--systemverilog" }, rootDir </> src]
+  -- Figure out where packagedb in dist-newstyle is
+  distNewstyleDir <- Path.parent . Path.parent <$> Path.parseAbsFile planPath0
+  ghcVersion <- Path.parseRelDir (Text.unpack (formatPkgId (Plan.pjCompilerId plan)))
+  let newstyleDbDir = distNewstyleDir </> $(Path.mkRelDir "packagedb") </> ghcVersion
 
-      phony "clashi" $ do
-          let src = srcDir </> clashModule <.> "hs" -- TODO
-          clash "clashi" [rootDir </> src]
+  -- Extract local store (bit hacky.. the proper way would be to read
+  -- improved-plan, but we can't because it's a pickled file)
+  localDbDirs <- concatMapM localDb (Map.elems (Plan.pjUnits plan))
+  let dbs = PackageDb newstyleDbDir : map PackageDb localDbDirs
 
-      phony "clash" $ do
-          need [manifest]
+  -- Extract all built (and pre-installed) packages from plan
+  let pkgs = map (Package . Plan.uId) (Map.elems (Plan.pjUnits plan))
 
-      phony "clean-clash" $ do
-          putNormal $ "Cleaning files in " ++ synDir
-          removeFilesAfter synDir [ "//*" ]
+  return (Set.fromList (pkgs <> dbs))
 
-    let kit = ClashKit{..}
-    return kit
+ where
+  -- Extract a local package database based on a Plan.Unit
+  localDb :: MonadThrow m => Plan.Unit -> m [Path Path.Abs Path.Dir]
+  -- Don't do anything for in-place packages:
+  localDb (Plan.uDistDir -> Just _) = pure []
 
+  -- Locate package db of external packages:
+  localDb unit = catMaybes <$> mapM go (Map.elems (Plan.uComps unit))
+   where
+    go (Plan.ciBinFile -> Just bf) = do
+      -- /home/.cabal/store/ghc-8.8.1/aeson-pretty-0.8.8-8_hash/bin/
+      binDir <- Path.parent <$> Path.parseAbsFile bf
 
-xilinxISE :: ClashKit -> XilinxTarget -> FilePath -> FilePath -> ClashRules ()
-xilinxISE ClashKit{..} fpga srcDir targetDir = do
-    ClashProject{..} <- ask
-    let outDir = buildDir </> targetDir
-        rootDir = joinPath . map (const "..") . splitPath $ outDir
+      -- /home/.cabal/store/ghc-8.8.1/aeson-pretty-0.8.8-8_hash
+      let pkgDir = Path.parent binDir
 
-    let ise tool args = do
-            root <- getConfig "ISE_ROOT"
-            wrap <- getConfig "ISE"
-            let exe = case (wrap, root) of
-                    (Just wrap1, _) -> [wrap1, tool]
-                    (Nothing, Just root1) -> [root1 </> "ISE/bin/lin64" </> tool]
-                    (Nothing, Nothing) -> error "ISE_ROOT or ISE must be set in build.mk"
-            cmd_ (Cwd outDir) exe args
+      -- /home/.cabal/store/ghc-8.8.1
+      let pkgsDir = Path.parent pkgDir
 
-    let getFiles dir pats = getDirectoryFiles srcDir [ dir </> pat | pat <- pats ]
-        hdlSrcs = getFiles "src-hdl" ["*.vhdl", "*.v", "*.ucf" ]
-        ipCores = getFiles "ipcore_dir" ["*.xco", "*.xaw"]
+      -- /home/.cabal/store/ghc-8.8.1/package.db
+      pure (Just (pkgsDir </> $(Path.mkRelDir "package.db")))
+    go _ = pure Nothing
 
-    lift $ do
-        outDir <//> "*.tcl" %> \out -> do
-            let src0 = shakeDir </> "xilinx-ise/project.tcl.mustache"
-            s <- T.pack <$> readFile' src0
-            alwaysRerun
-
-            srcs1 <- manifestSrcs
-            srcs2 <- hdlSrcs
-            cores <- ipCores
-
-            template <- case Mustache.compileTemplate src0 s of
-                Left err -> fail (show err)
-                Right template -> return template
-            let values = object . mconcat $
-                         [ [ "project" ~> T.pack projectName ]
-                         , [ "top" ~> T.pack topName ]
-                         , targetMustache fpga
-                         , [ "srcs" ~> mconcat
-                             [ [ object [ "fileName" ~> (rootDir </> src1) ] | src1 <- srcs1 ]
-                             , [ object [ "fileName" ~> (rootDir </> srcDir </> src1) ] | src1 <- srcs2 ]
-                             , [ object [ "fileName" ~> core ] | core <- cores ]
-                             ]
-                           ]
-                         , [ "ipcores" ~> [ object [ "name" ~> takeBaseName core ] | core <- cores ] ]
-                         ]
-            writeFileChanged out . T.unpack $ Mustache.substitute template values
-
-        outDir </> "ipcore_dir" <//> "*" %> \out -> do
-            let src = srcDir </> makeRelative outDir out
-            copyFileChanged src out
-
-        phony (takeBaseName targetDir </> "ise") $ do
-            need [outDir </> projectName <.> "tcl"]
-            ise "ise" [outDir </> projectName <.> "tcl"]
-
-        phony (takeBaseName targetDir </> "bitfile") $ do
-            need [outDir </> topName <.> "bit"]
-
-        outDir </> topName <.> "bit" %> \_out -> do
-            srcs1 <- manifestSrcs
-            srcs2 <- hdlSrcs
-            cores <- ipCores
-            need $ mconcat
-              [ [ outDir </> projectName <.> "tcl" ]
-              , [ src | src <- srcs1 ]
-              , [ srcDir </> src | src <- srcs2 ]
-              , [ outDir </> core | core <- cores ]
-              ]
-            ise "xtclsh" [projectName <.> "tcl", "rebuild_project"]
-
-xilinxVivado :: ClashKit -> XilinxTarget -> FilePath -> FilePath -> ClashRules ()
-xilinxVivado ClashKit{..} fpga srcDir targetDir = do
-    ClashProject{..} <- ask
-    let outDir = buildDir </> targetDir
-        projectDir = outDir </> projectName
-        xpr = projectDir </> projectName <.> "xpr"
-
-    let vivado tool args = do
-            root0 <- getConfig "VIVADO_ROOT"
-            wrap0 <- getConfig "VIVADO"
-            let exe = case (wrap0, root0) of
-                    (Just wrap1, _) -> [wrap1, tool]
-                    (Nothing, Just root1) -> [root1 </> "bin" </> tool]
-                    (Nothing, Nothing) -> error "VIVADO_ROOT or VIVADO must be set in build.mk"
-            cmd_ (Cwd outDir) exe args
-        vivadoBatch tcl = do
-            need [outDir </> tcl]
-            vivado "vivado"
-              [ "-mode", "batch"
-              , "-nojournal"
-              , "-nolog"
-              , "-source", tcl
-              ]
-
-    let getFiles dir pats = getDirectoryFiles srcDir [ dir </> pat | pat <- pats ]
-        hdlSrcs = getFiles "src-hdl" ["*.vhdl", "*.v" ]
-        constrSrcs = getFiles "src-hdl" ["*.xdc" ]
-        ipCores = getFiles "ip" ["*.xci"]
-
-    lift $ do
-        xpr %> \_out -> vivadoBatch "project.tcl"
-
-        outDir </> "project.tcl" %> \out -> do
-            let src = shakeDir </> "xilinx-vivado/project.tcl.mustache"
-            s <- T.pack <$> readFile' src
-            alwaysRerun
-
-            srcs1 <- manifestSrcs
-            srcs2 <- hdlSrcs
-            cores <- ipCores
-            constrs <- constrSrcs
-
-            template <- case Mustache.compileTemplate src s of
-                Left err -> fail (show err)
-                Right template -> return template
-            let values = object . mconcat $
-                         [ [ "project" ~> T.pack projectName ]
-                         , [ "top" ~> T.pack topName ]
-                         , targetMustache fpga
-                         , [ "board" ~> T.pack "digilentinc.com:nexys-a7-50t:part0:1.0" ] -- TODO
-                         , [ "srcs" ~> mconcat
-                             [ [ object [ "fileName" ~> src1 ] | src1 <- srcs1 ]
-                             , [ object [ "fileName" ~> (srcDir </> src1) ] | src1 <- srcs2 ]
-                             ]
-                           ]
-                         , [ "coreSrcs" ~> object
-                             [ "nonempty" ~> not (null cores)
-                             , "items" ~> [ object [ "fileName" ~> (srcDir </> core) ] | core <- cores ]
-                             ]
-                           ]
-                         , [ "ipcores" ~> [ object [ "name" ~> takeBaseName core ] | core <- cores ] ]
-                         , [ "constraintSrcs" ~> [ object [ "fileName" ~> (srcDir </> src1) ] | src1 <- constrs ] ]
-                         ]
-            writeFileChanged out . T.unpack $ Mustache.substitute template values
-
-        outDir </> "build.tcl" %> \out -> do
-            let src = shakeDir </> "xilinx-vivado/project-build.tcl.mustache"
-            s <- T.pack <$> readFile' src
-            alwaysRerun
-
-            template <- case Mustache.compileTemplate src s of
-                Left err -> fail (show err)
-                Right template -> return template
-            let values = object . mconcat $
-                         [ [ "project" ~> T.pack projectName ]
-                         , [ "top" ~> T.pack topName ]
-                         ]
-            writeFileChanged out . T.unpack $ Mustache.substitute template values
-
-        outDir </> "upload.tcl" %> \out -> do
-            let src = shakeDir </> "xilinx-vivado/upload.tcl.mustache"
-            s <- T.pack <$> readFile' src
-            alwaysRerun
-
-            template <- case Mustache.compileTemplate src s of
-                Left err -> fail (show err)
-                Right template -> return template
-            let values = object . mconcat $
-                         [ [ "project" ~> T.pack projectName ]
-                         , [ "top" ~> T.pack topName ]
-                         , targetMustache fpga
-                         ]
-            writeFileChanged out . T.unpack $ Mustache.substitute template values
-
-        phony (takeBaseName targetDir </> "vivado") $ do
-            need [xpr]
-            vivado "vivado" [xpr]
-
-        phony (takeBaseName targetDir </> "bitfile") $ do
-            need [projectDir </> projectName <.> "runs" </> "impl_1" </> topName <.> "bit"]
-
-        projectDir </> projectName <.> "runs" </> "impl_1" </> topName <.> "bit" %> \_out -> do
-            need [xpr]
-            vivadoBatch "build.tcl"
-
-        phony (takeBaseName targetDir </> "upload") $ do
-            need [projectDir </> projectName <.> "runs" </> "impl_1" </> topName <.> "bit"]
-            vivadoBatch "upload.tcl"
-
-clashShake :: ClashProject -> ClashRules () -> IO ()
-clashShake proj@ClashProject{..} rules =
-  shakeArgs shakeOptions{ shakeFiles = buildDir } $ do
-    cfg <- do
-        haveConfig <- liftIO $ Dir.doesFileExist "build.mk"
-        if haveConfig then do
-            usingConfigFile "build.mk"
-            liftIO $ readConfigFile "build.mk"
-          else do
-            usingConfig mempty
-            return mempty
-    runReaderT rules proj
-
-    phony "clean" $ do
-        putNormal $ "Cleaning files in " ++ buildDir
-        removeFilesAfter buildDir [ "//*" ]
-
-    want $ case HM.lookup "TARGET" cfg of
-        Nothing -> ["clash"]
-        Just target -> [target </> "bitfile"]
-
-hexImage :: Maybe Int -> FilePath -> FilePath -> Shake.Action ()
-hexImage size src out = do
-    bs <- liftIO $ maybe id ensureSize size . BS.unpack <$> BS.readFile src
-    let bvs = map (filter (/= '_') . show . pack) bs
-    writeFileChanged out (unlines bvs)
-  where
-    ensureSize size_ bs = take size_ $ bs <> repeat 0
+---- | Create a 'ClashProject' with 'cpPkg', 'cpModule', and 'cpTop' set
+---- according to the name passed in.
+--clashProject :: TH.Name -> ClashProject
+--clashProject (TH.Name nm flavor)
+--  | TH.OccName fNm <- nm
+--  , TH.NameG TH.VarName (TH.PkgName pkg) (TH.ModName modNm) <- flavor
+--  = emptyClashProject
+--      { cpPkg=Text.pack pkg
+--      , cpModule=Text.pack modNm
+--      , cpTop=Text.pack fNm
+--      }
+--clashProject _ =
+--  error [I.i|
+--    Unsupported name passed to 'clashProject'. Only names refering to functions
+--    in external packages are supported.
+--  |]
