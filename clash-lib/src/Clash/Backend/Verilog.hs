@@ -1105,7 +1105,8 @@ expr_ _ (DataTag (RTree _ _) (Right _)) = do
   iw <- Mon $ use intWidth
   int iw <> "'sd1"
 
-expr_ b (ConvBV _ _ _ e) = expr_ b e
+expr_ b (ToBv _ _ e) = expr_ b e
+expr_ b (FromBv _ _ e) = expr_ b e
 
 expr_ b (IfThenElse c t e) =
   parenIf b (expr_ True c <+> "?" <+> expr_ True t <+> ":" <+> expr_ True e)

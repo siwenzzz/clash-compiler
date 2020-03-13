@@ -369,7 +369,19 @@ data Expr
       !BlackBox                -- FIELD Template tokens
       !BlackBoxContext         -- FIELD Context in which tokens should be rendered
       !Bool                    -- FIELD Wrap in paretheses?
-  | ConvBV     (Maybe Identifier) HWType Bool Expr
+
+  -- | Convert some type to a BitVector.
+  | ToBv
+      (Maybe Identifier) -- FIELD Type prefix
+      HWType             -- FIELD Type to convert _from_
+      Expr               -- FIELD Expression to convert to BitVector
+
+  -- | Convert BitVector to some type.
+  | FromBv
+      (Maybe Identifier) -- FIELD Type prefix
+      HWType             -- FIELD Type to convert _to_
+      Expr               -- FIELD BitVector to convert
+
   | IfThenElse Expr Expr Expr
   -- | Do nothing
   | Noop
