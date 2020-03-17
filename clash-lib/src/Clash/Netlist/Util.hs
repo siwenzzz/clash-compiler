@@ -1417,8 +1417,8 @@ mkTopUnWrapper topEntity annM man dstId args tickDecls = do
         topName
         instLabel3
         []
-        ( map (\(p,i,t) -> (Identifier p Nothing,In, t,Identifier i Nothing)) (concat iports) ++
-          map (\(p,o,t) -> (Identifier p Nothing,Out,t,Identifier o Nothing)) oports)
+        (NamedPortMap ( map (\(p,i,t) -> (Identifier p Nothing,In, t,Identifier i Nothing)) (concat iports)
+                     ++ map (\(p,o,t) -> (Identifier p Nothing,Out,t,Identifier o Nothing)) oports))
 
   case topOutputM of
     Nothing ->

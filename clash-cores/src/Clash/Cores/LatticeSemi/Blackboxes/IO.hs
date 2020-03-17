@@ -75,7 +75,8 @@ sbioTemplate bbCtx = do
     , InstDecl Comp Nothing compName sbio_inst
       [ (Identifier "PIN_TYPE" Nothing, BitVector 6, pinConfig)
       ]
-      [ -- NOTE: Direction is set to 'In', but will be rendered as inout due to
+      (NamedPortMap [
+        -- NOTE: Direction is set to 'In', but will be rendered as inout due to
         -- its the type packackagePinTy
         (Identifier "PACKAGE_PIN" Nothing, In, packagePinTy, packagePin)
       , (Identifier "LATCH_INPUT_VALUE" Nothing, In, Bit, latchInput)
@@ -89,7 +90,7 @@ sbioTemplate bbCtx = do
       , (Identifier "D_OUT_1" Nothing, In, Bit, dOut1)
       , (Identifier "D_IN_0" Nothing, Out, Bit, Identifier dIn0 Nothing)
       , (Identifier "D_IN_1" Nothing, Out, Bit, Identifier dIn1 Nothing)
-      ]
+      ])
     , Assignment result resultTuple
     ]
  where

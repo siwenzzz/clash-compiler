@@ -993,7 +993,8 @@ mkFunInput resId e =
                                                 , Identifier "~RESULT" Nothing )
                       i <- varCount <<%= (+1)
                       let instLabel     = TextS.concat [compName,TextS.pack ("_" ++ show i)]
-                          instDecl      = InstDecl Entity Nothing compName instLabel [] (outpAssign:inpAssigns)
+                          portMap       = NamedPortMap (outpAssign:inpAssigns)
+                          instDecl      = InstDecl Entity Nothing compName instLabel [] portMap
                       return (Right (("",tickDecls ++ [instDecl]),Wire))
                     Nothing -> error $ $(curLoc) ++ "Cannot make function input for: " ++ showPpr e
             C.Lam {} -> do
