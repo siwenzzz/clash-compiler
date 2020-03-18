@@ -106,6 +106,13 @@ instance Backend SystemVerilogState where
 
   genHDL          = genVerilog
   mkTyPackage     = mkTyPackage_
+  hdlHWTypeKind = \case
+    Vector {} -> pure UserType
+    RTree {} -> pure UserType
+    Product {} -> pure UserType
+    BiDirectional _ ty -> hdlHWTypeKind ty
+    Annotated _ ty -> hdlHWTypeKind ty
+    _ -> pure PrimitiveType
   hdlType _       = verilogType
   hdlTypeErrValue = verilogTypeErrValue
   hdlTypeMark     = verilogTypeMark

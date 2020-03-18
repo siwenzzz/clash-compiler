@@ -43,10 +43,10 @@ myAddTemplate bbCtx = do
     [ InstDecl Comp Nothing "my_add" "my_add_inst"
         [ (Identifier "size" Nothing, Integer, Literal Nothing (NumLit . fromIntegral $ typeSize xTy))
         ]
-        [ (Identifier "x" Nothing, In, xTy, xExp)
+        (NamedPortMap [ (Identifier "x" Nothing, In, xTy, xExp)
         , (Identifier "y" Nothing, In, yTy, yExp)
         , (Identifier "result" Nothing, Out, resTy, resExp)
-        ]
+        ])
     ]
 
 {-# ANN myAdd

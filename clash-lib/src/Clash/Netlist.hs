@@ -23,7 +23,6 @@ import           Control.Exception                (throw)
 import           Control.Lens                     ((.=))
 import qualified Control.Lens                     as Lens
 import           Control.Monad                    (join)
-import           Control.Monad.IO.Class           (liftIO)
 import           Control.Monad.Reader             (runReaderT)
 import           Control.Monad.State.Strict       (State, runStateT)
 import           Data.Binary.IEEE754              (floatToWord, doubleToWord)
@@ -40,8 +39,6 @@ import qualified Data.Set                         as Set
 import           Data.Primitive.ByteArray         (ByteArray (..))
 import qualified Data.Text                        as StrictText
 import           GHC.Integer.GMP.Internals        (Integer (..), BigNat (..))
-import           System.FilePath                  ((</>), (<.>))
-import           Text.Read                        (readMaybe)
 
 import           Outputable                       (ppr, showSDocUnsafe)
 import           SrcLoc                           (isGoodSrcSpan)
@@ -586,19 +583,7 @@ mkFunApp dstId fun args tickDecls = do
           (hWTysFiltered, argExprsFiltered) = unzip filteredTypeExprs
 
         dstHWty  <- unsafeCoreTypeToHWTypeM' $(curLoc) fResTy
-        env  <- Lens.use hdlDir
-        mkId <- Lens.use mkIdentifierFn
-        prefixM <- Lens.use componentPrefix
-        newInlineStrat <- opt_newInlineStrat <$> Lens.use clashOpts
-        let topName = StrictText.unpack
-                      (genTopComponentName newInlineStrat mkId prefixM annM fun)
-            modName = takeWhile (/= '.')
-                                (StrictText.unpack (nameOcc (varName fun)))
-        manFile <- case annM of
-          Just _  -> return (env </> ".." </> modName </> topName </> topName <.> "manifest")
-          Nothing -> return (env </> topName <.> "manifest")
-        Just man <- readMaybe <$> liftIO (readFile manFile)
-        instDecls <- mkTopUnWrapper fun annM man (dstId,dstHWty)
+        instDecls <- mkTopUnWrapper fun annM (dstId, dstHWty)
                        (zip argExprsFiltered hWTysFiltered)
                        tickDecls
         return (argDecls ++ instDecls)
