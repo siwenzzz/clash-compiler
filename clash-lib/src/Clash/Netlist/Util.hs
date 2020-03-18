@@ -1794,16 +1794,6 @@ mkTopOutput' pM = case pM of
         _ ->
           portProductError $(curLoc) hwty' (PortProduct p ps0)
 
-concatPortDecls3
-  :: [([(Identifier,Identifier,HWType)]
-      ,[Declaration]
-      ,Either Identifier (Identifier,HWType))]
-  -> ([(Identifier,Identifier,HWType)]
-     ,[Declaration]
-     ,[Either Identifier (Identifier,HWType)])
-concatPortDecls3 portDecls = case unzip3 portDecls of
-  (ps,decls,ids) -> (concat ps, concat decls, ids)
-
 -- | Try to merge nested modifiers into a single modifier, needed by the VHDL
 -- and SystemVerilog backend.
 nestM :: Modifier -> Modifier -> Maybe Modifier
