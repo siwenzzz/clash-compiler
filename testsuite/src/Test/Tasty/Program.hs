@@ -273,7 +273,9 @@ runProgram program args stdO stdF workDir = do
   (exitCode, stdout, stderr) <- readCreateProcessWithExitCode cp ""
 
   -- For debugging: Uncomment this to print executable and and its arguments
-  --putStrLn $ show program ++ " " ++ concatMap (++ " ") args
+  putStrLn $ ""
+  putStrLn $ show program ++ " " ++ concatMap (++ " ") args
+  putStrLn $ ""
 
   let stdoutT = T.pack stdout
       stderrT = T.pack stderr

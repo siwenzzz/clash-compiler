@@ -15,7 +15,7 @@ import System.Environment (getArgs)
 import System.FilePath ((</>))
 
 import Clash.Backend (mkUniqueIdentifier, blockDecl)
-import Clash.Netlist.Id (IdType(Basic))
+import Clash.Netlist.Id (IdentifierType(Basic))
 import Clash.Netlist.Types
 import Clash.Netlist.Util (typeSize)
 

@@ -19,11 +19,10 @@ module Clash.Backend.SystemVerilog (SystemVerilogState) where
 import qualified Control.Applicative                  as A
 import           Control.Lens                         hiding (Indexed)
 import           Control.Monad                        (forM,liftM,zipWithM)
-import           Control.Monad.State                  (State)
+import           Control.Monad.State                  (State, StateT)
 import           Data.Bits                            (Bits, testBit)
 import           Data.HashMap.Lazy                    (HashMap)
 import qualified Data.HashMap.Lazy                    as HashMap
-import qualified Data.HashMap.Strict                  as HashMapS
 import           Data.HashSet                         (HashSet)
 import qualified Data.HashSet                         as HashSet
 import           Data.List                            (nub, nubBy)
@@ -36,6 +35,7 @@ import           Data.Semigroup.Monad
 import qualified Data.Text.Lazy                       as Text
 import qualified Data.Text                            as TextS
 import           Data.Text.Prettyprint.Doc.Extra
+import qualified Data.Text.Prettyprint.Doc.Extra      as PP
 import qualified System.FilePath
 
 import           Clash.Annotations.Primitive          (HDL (..))
@@ -53,9 +53,9 @@ import           Clash.Backend.Verilog
 import           Clash.Netlist.BlackBox.Types         (HdlSyn (..))
 import           Clash.Netlist.BlackBox.Util
   (extractLiterals, renderBlackBox, renderFilePath)
-import           Clash.Netlist.Id                     (IdType (..), mkBasicId')
+import qualified Clash.Netlist.Id                     as Id
 import           Clash.Netlist.Types                  hiding (_intWidth, intWidth)
-import           Clash.Netlist.Util                   hiding (mkIdentifier, extendIdentifier)
+import           Clash.Netlist.Util
 import           Clash.Signal.Internal                (ActiveEdge (..))
 import           Clash.Util
   (SrcSpan, noSrcSpan, curLoc, makeCached, first, on, indexNote)
@@ -65,11 +65,11 @@ import           Clash.Util.Graph                     (reverseTopSort)
 data SystemVerilogState =
   SystemVerilogState
     { _tyCache   :: HashSet HWType -- ^ Previously encountered  HWTypes
-    , _tySeen    :: HashMapS.HashMap Identifier Word -- ^ Product type counter
+    , _tySeen    :: IdentifierSet -- ^ Product type counter
     , _nameCache :: HashMap HWType Doc -- ^ Cache for previously generated product type names
     , _genDepth  :: Int -- ^ Depth of current generative block
-    , _modNm     :: Identifier
-    , _idSeen    :: HashMapS.HashMap Identifier Word
+    , _modNm     :: ModName
+    , _idSeen    :: IdentifierSet
     , _oports    :: [Identifier]
     , _srcSpan   :: SrcSpan
     , _includes  :: [(String,Doc)]
@@ -84,16 +84,34 @@ data SystemVerilogState =
     -- ^ Are we in the context of generating the @_types@  package?
     , _intWidth  :: Int -- ^ Int/Word/Integer bit-width
     , _hdlsyn    :: HdlSyn
-    , _escapedIds :: Bool
     , _undefValue :: Maybe (Maybe Int)
     }
 
 makeLenses ''SystemVerilogState
 
+instance HasIdentifierSet SystemVerilogState where
+  identifierSet = idSeen
+
 instance Backend SystemVerilogState where
-  initBackend     = SystemVerilogState HashSet.empty HashMapS.empty HashMap.empty
-                                       0 "" HashMapS.empty [] noSrcSpan [] [] []
-                                       [] [] False
+  initBackend w hdlsyn_ esc undefVal = SystemVerilogState {
+      _tyCache=HashSet.empty
+    , _tySeen=Id.emptyIdentifierSet esc SystemVerilog
+    , _nameCache=HashMap.empty
+    , _genDepth=0
+    , _modNm=""
+    , _idSeen=Id.emptyIdentifierSet esc SystemVerilog
+    , _oports=[]
+    , _srcSpan=noSrcSpan
+    , _includes=[]
+    , _imports=[]
+    , _libraries=[]
+    , _dataFiles=[]
+    , _memoryDataFiles=[]
+    , _tyPkgCtx=False
+    , _intWidth=w
+    , _hdlsyn=hdlsyn_
+    , _undefValue=undefVal
+    }
   hdlKind         = const SystemVerilog
   primDirs        = const $ do root <- primsRoot
                                return [ root System.FilePath.</> "common"
@@ -131,35 +149,9 @@ instance Backend SystemVerilogState where
   inst            = inst_
   expr            = expr_
   iwWidth         = use intWidth
-  toBV hty id_    = toSLV hty (Identifier (Text.toStrict id_) Nothing)
+  toBV hty id_    = toSLV hty (Identifier (Id.unsafeMake (Text.toStrict id_)) Nothing)
   fromBV hty id_  = simpleFromSLV hty (Text.toStrict id_)
   hdlSyn          = use hdlsyn
-  mkIdentifier    = do
-      allowEscaped <- use escapedIds
-      return (go allowEscaped)
-    where
-      go _ Basic nm = case (TextS.take 1024 . filterReserved) (mkBasicId' SystemVerilog True nm) of
-        nm' | TextS.null nm' -> "_clash_internal"
-            | otherwise -> nm'
-      go esc Extended (rmSlash . escapeTemplate -> nm) = case go esc Basic nm of
-        nm' | esc && nm /= nm' -> TextS.concat ["\\",nm," "]
-            | otherwise -> nm'
-  extendIdentifier = do
-      allowEscaped <- use escapedIds
-      return (go allowEscaped)
-    where
-      go _ Basic nm ext =
-        case (TextS.take 1024 . filterReserved) (mkBasicId' SystemVerilog True (nm `TextS.append` ext)) of
-          nm' | TextS.null nm' -> "_clash_internal"
-              | otherwise -> nm'
-      go esc Extended (rmSlash -> nm) ext =
-        let nmExt = nm `TextS.append` ext
-        in  case go esc Basic nm ext of
-              nm' | esc && nm' /= nmExt -> case TextS.isPrefixOf "c$" nmExt of
-                      True -> TextS.concat ["\\",nmExt," "]
-                      _    -> TextS.concat ["\\c$",nmExt," "]
-                  | otherwise -> nm'
-
   setModName nm s = s {_modNm = nm}
   setSrcSpan      = (srcSpan .=)
   getSrcSpan      = use srcSpan
@@ -182,67 +174,30 @@ instance Backend SystemVerilogState where
   getDataFiles = use dataFiles
   addMemoryDataFile f = memoryDataFiles %= (f:)
   getMemoryDataFiles = use memoryDataFiles
-  seenIdentifiers = idSeen
   ifThenElseExpr _ = True
 
-rmSlash :: Identifier -> Identifier
+rmSlash :: TextS.Text -> TextS.Text
 rmSlash nm = fromMaybe nm $ do
   nm1 <- TextS.stripPrefix "\\" nm
   pure (TextS.filter (not . (== ' ')) nm1)
 
 type SystemVerilogM a = Mon (State SystemVerilogState) a
 
--- List of reserved SystemVerilog-2012 keywords
-reservedWords :: [Identifier]
-reservedWords = ["accept_on","alias","always","always_comb","always_ff"
-  ,"always_latch","and","assert","assign","assume","automatic","before","begin"
-  ,"bind","bins","binsof","bit","break","buf","bufif0","bufif1","byte","case"
-  ,"casex","casez","cell","chandle","checker","class","clocking","cmos","config"
-  ,"const","constraint","context","continue","cover","covergroup","coverpoint"
-  ,"cross","deassign","default","defparam","design","disable","dist","do","edge"
-  ,"else","end","endcase","endchecker","endclass","endclocking","endconfig"
-  ,"endfunction","endgenerate","endgroup","endinterface","endmodule","endpackage"
-  ,"endprimitive","endprogram","endproperty","endspecify","endsequence"
-  ,"endtable","endtask","enum","event","eventually","expect","export","extends"
-  ,"extern","final","first_match","for","force","foreach","forever","fork"
-  ,"forkjoin","function","generate","genvar","global","highz0","highz1","if"
-  ,"iff","ifnone","ignore_bins","illegal_bins","implements","implies","import"
-  ,"incdir","include","initial","inout","input","inside","instance","int"
-  ,"integer","interconnect","interface","intersect","join","join_any"
-  ,"join_none","large","let","liblist","library","local","localparam","logic"
-  ,"longint","macromodule","matches","medium","modport","module","nand"
-  ,"negedge","nettype","new","nexttime","nmos","nor","noshowcancelled","not"
-  ,"notif0","notif1","null","or","output","package","packed","parameter","pmos"
-  ,"posedge","primitive","priority","program","property","protected","pull0"
-  ,"pull1","pulldown","pullup","pulsestyle_ondetect","pulsestyle_onevent"
-  ,"pure","rand","randc","randcase","randsequence","rcmos","real","realtime"
-  ,"ref","reg","reject_on","release","repeat","restrict","return","rnmos"
-  ,"rpmos","rtran","rtranif0","rtranif1","s_always","s_eventually","s_nexttime"
-  ,"s_until","s_until_with","scalared","sequence","shortint","shortreal"
-  ,"showcancelled","signed","small","soft","solve","specify","specparam"
-  ,"static","string","strong","strong0","strong1","struct","super","supply0"
-  ,"supply1","sync_accept_on","sync_reject_on","table","tagged","task","this"
-  ,"throughout","time","timeprecision","timeunit","tran","tranif0","tranif1"
-  ,"tri","tri0","tri1","triand","trior","trireg","type","typedef","union"
-  ,"unique","unique0","unsigned","until","until_with","untyped","use","uwire"
-  ,"var","vectored","virtual","void","wait","wait_order","wand","weak","weak0"
-  ,"weak1","while","wildcard","wire","with","within","wor","xnor","xor"]
-
-filterReserved :: Identifier -> Identifier
-filterReserved s = if s `elem` reservedWords
-  then s `TextS.append` "_r"
-  else s
-
 -- | Generate SystemVerilog for a Netlist component
-genVerilog :: Identifier -> SrcSpan -> HashMapS.HashMap Identifier Word -> Component -> SystemVerilogM ((String,Doc),[(String,Doc)])
+genVerilog
+  :: TextS.Text
+  -> SrcSpan
+  -> IdentifierSet
+  -> Component
+  -> SystemVerilogM ((String, Doc), [(String, Doc)])
 genVerilog _ sp seen c = preserveSeen $ do
     Mon $ idSeen .= seen
     -- Don't have type names conflict with module names
-    Mon $ tySeen %= HashMapS.unionWith max seen
+    Mon $ tySeen %= Id.union seen
     Mon $ setSrcSpan sp
     v    <- verilog
     incs <- Mon $ use includes
-    return ((TextS.unpack cName,v),incs)
+    return ((TextS.unpack (Id.toText cName), v), incs)
   where
     cName   = componentName c
     verilog = commentHeader <> line <>
@@ -255,9 +210,7 @@ genVerilog _ sp seen c = preserveSeen $ do
     timescale = "`timescale 100fs/100fs"
 
 -- | Generate a SystemVerilog package containing type definitions for the given HWTypes
-mkTyPackage_ :: Identifier
-             -> [HWType]
-             -> SystemVerilogM [(String,Doc)]
+mkTyPackage_ :: TextS.Text -> [HWType] -> SystemVerilogM [(String,Doc)]
 mkTyPackage_ modName hwtys = do
     Mon (tyPkgCtx .= True)
     normTys <- nub <$> mapM (normaliseType) (hwtys ++ usedTys)
@@ -459,13 +412,13 @@ funDec ty@(Vector n elTy) | typeSize ty > 0 = Just A.<$>
   if n > 1 then
     "function" <+> "automatic" <+> tName <+> tName <> "_cons" <> parens (sigDecl "x" elTy <> comma <> vecSigDecl "xs") <> semi <> line <>
     indent 2
-      (tName <> "_cons" <> brackets (int 0) <+> "=" <+> (toSLV elTy (Identifier "x" Nothing)) <> semi <> line <>
+      (tName <> "_cons" <> brackets (int 0) <+> "=" <+> (toSLV elTy (Identifier (Id.unsafeMake "x") Nothing)) <> semi <> line <>
        tName <> "_cons" <> brackets (int 1 <> colon <> int (n-1)) <+> "=" <+> "xs" <> semi) <> line <>
     "endfunction"
   else
     "function" <+> "automatic" <+> tName <+> tName <> "_cons" <> parens (sigDecl "x" elTy) <> semi <> line <>
     indent 2
-      (tName <> "_cons" <> brackets (int 0) <+> "=" <+> (toSLV elTy (Identifier "x" Nothing)) <> semi) <> line <>
+      (tName <> "_cons" <> brackets (int 0) <+> "=" <+> (toSLV elTy (Identifier (Id.unsafeMake "x") Nothing)) <> semi) <> line <>
     "endfunction"
   where
     tName  = tyName ty
@@ -536,7 +489,7 @@ funDec _ = pure Nothing
 
 module_ :: Component -> SystemVerilogM Doc
 module_ c =
-  addSeen c *> modVerilog <* Mon (imports .= [] >> oports .= [])
+  modVerilog <* Mon (imports .= [] >> oports .= [])
  where
   modVerilog = do
     body <- modBody
@@ -544,7 +497,7 @@ module_ c =
     libs <- Mon $ use libraries
     modHeader <> line <> modPorts <> line <> include (nub imps) <> uselibs (nub libs) <> pure body <> line <> modEnding
 
-  modHeader  = "module" <+> stringS (componentName c)
+  modHeader  = "module" <+> pretty (componentName c)
   modPorts   = indent 4 (tupleInputs inPorts <> line <> tupleOutputs outPorts <> semi)
   modBody    = indent 2 (decls (declarations c)) <> line <> line <> indent 2 (insts (declarations c))
   modEnding  = "endmodule"
@@ -563,7 +516,7 @@ module_ c =
   -- map a port to its verilog type, port name, and any encoding notes
   sigPort (wr2ty -> portTy) (nm, hwTy) iEM
     = addAttrs (hwTypeAttrs hwTy)
-        (portTy <+> sigDecl (stringS nm) hwTy <> iE <+> encodingNote hwTy)
+        (portTy <+> sigDecl (pretty nm) hwTy <> iE <+> encodingNote hwTy)
     where
       iE = maybe emptyDoc (noEmptyInit . expr_ False) iEM
   -- slightly more readable than 'tupled', makes the output Haskell-y-er
@@ -584,33 +537,6 @@ module_ c =
                        else string "  " <> pure x)
                 <> (if null xs then emptyDoc else line <> vcat (forM xs commafy))
                 <> line <> rparen
-
-addSeen :: Component -> SystemVerilogM ()
-addSeen c = do
-  let iport = map fst (inputs c)
-      oport = map (fst . (\(_,x,_)->x)) $ outputs c
-      nets  = mapMaybe (\case {NetDecl' _ _ i _ _ -> Just i; _ -> Nothing}) $ declarations c
-  Mon (idSeen %= (HashMapS.unionWith max (HashMapS.fromList (concatMap (map (,0)) [iport,oport,nets]))))
-  Mon (oports .= oport)
-
-mkUniqueId :: Identifier -> SystemVerilogM Identifier
-mkUniqueId i = do
-  mkId <- Mon (mkIdentifier <*> pure Extended)
-  seen <- Mon $ use idSeen
-  let i' = mkId i
-  case HashMapS.lookup i seen of
-    Just n -> go mkId seen i' n
-    Nothing -> do Mon (idSeen %= (HashMapS.insert i' 0))
-                  return i'
-  where
-    go :: (Identifier -> Identifier) -> HashMapS.HashMap Identifier Word -> Identifier
-       -> Word -> SystemVerilogM Identifier
-    go mkId seen i' n = do
-      let i'' = mkId (TextS.append i' (TextS.pack ('_':show n)))
-      case HashMapS.lookup i'' seen of
-        Just _  -> go mkId seen i' (n+1)
-        Nothing -> do Mon (idSeen %= (HashMapS.insert i'' (n+1)))
-                      return i''
 
 verilogType :: HWType -> SystemVerilogM Doc
 verilogType t_ = do
@@ -670,25 +596,10 @@ tyName t@(CustomSP _ _ _ _)  = "logic_vector_" <> int (typeSize t)
 tyName t@(Product nm _ _)      = do
   tN <- normaliseType t
   Mon (makeCached tN nameCache prodName)
-  where
-    prodName = do
-      seen <- use tySeen
-      mkId <- mkIdentifier <*> pure Basic
-      let nm'  = (mkId . last . TextS.splitOn ".") nm
-          nm'' = if TextS.null nm'
-                    then "product"
-                    else nm'
-          (nm3,count) = case HashMapS.lookup nm'' seen of
-                          Just cnt -> go mkId seen cnt nm''
-                          Nothing  -> (nm'',0)
-      tySeen %= HashMap.insert nm3 count
-      stringS nm3
+ where
+  prodName :: StateT SystemVerilogState Identity Doc
+  prodName = PP.pretty =<< Id.makeBasicOr (last (TextS.splitOn "." nm)) "product"
 
-    go mkId s i n =
-      let n' = n `TextS.append` TextS.pack ('_':show i)
-      in  case HashMapS.lookup n' s of
-                 Just _  -> go mkId s (i+1) n
-                 Nothing -> (n',i+1)
 tyName t@(SP _ _) = "logic_vector_" <> int (typeSize t)
 tyName (Clock _)  = "logic"
 tyName (Reset {}) = "logic"
@@ -735,8 +646,8 @@ decl :: Declaration -> SystemVerilogM (Maybe Doc)
 decl (NetDecl' noteM _ id_ tyE iEM) =
   Just A.<$> maybe id addNote noteM (addAttrs attrs (typ tyE))
   where
-    typ (Left  ty) = stringS ty <+> stringS id_ <> iE
-    typ (Right ty) = sigDecl (stringS id_) ty <> iE
+    typ (Left  ty) = stringS ty <+> pretty id_ <> iE
+    typ (Right ty) = sigDecl (pretty id_) ty <> iE
     addNote n = mappend ("//" <+> stringS n <> line)
     attrs = fromMaybe [] (hwTypeAttrs A.<$> either (const Nothing) Just tyE)
     iE = maybe emptyDoc (noEmptyInit . expr_ False) iEM
@@ -817,7 +728,7 @@ patMod hwTy (NumLit i) = NumLit (i `mod` (2 ^ typeSize hwTy))
 patMod _ l = l
 
 -- | Helper function for inst_, handling CustomSP and CustomSum
-inst_' :: TextS.Text -> Expr -> HWType -> [(Maybe Literal, Expr)] -> SystemVerilogM (Maybe Doc)
+inst_' :: Identifier -> Expr -> HWType -> [(Maybe Literal, Expr)] -> SystemVerilogM (Maybe Doc)
 inst_' id_ scrut scrutTy es = fmap Just $
   "always_comb begin" <> line <> indent 2 casez <> line <> "end"
     where
@@ -832,10 +743,10 @@ inst_' id_ scrut scrutTy es = fmap Just $
 
       conds :: [(Maybe Literal,Expr)] -> SystemVerilogM Doc
       conds []                = error $ $(curLoc) ++ "Empty list of conditions invalid."
-      conds [(_,e)]           = "default" <+> ":" <+> stringS id_ <+> "=" <+> expr_ False e <> ";"
-      conds ((Nothing,e):_)   = "default" <+> ":" <+> stringS id_ <+> "=" <+> expr_ False e <> ";"
+      conds [(_,e)]           = "default" <+> ":" <+> pretty id_ <+> "=" <+> expr_ False e <> ";"
+      conds ((Nothing,e):_)   = "default" <+> ":" <+> pretty id_ <+> "=" <+> expr_ False e <> ";"
       conds ((Just c ,e):es') =
-        mask' <+> ":" <+> stringS id_ <+> "=" <+> expr_ False e <> ";" <> line <> conds es'
+        mask' <+> ":" <+> pretty id_ <+> "=" <+> expr_ False e <> ";" <> line <> conds es'
           where
             mask' = patLitCustom scrutTy c
 
@@ -844,28 +755,28 @@ inst_ :: Declaration -> SystemVerilogM (Maybe Doc)
 inst_ (TickDecl {}) = return Nothing
 
 inst_ (Assignment id_ e) = fmap Just $
-  "assign" <+> stringS id_ <+> equals <+> align (expr_ False e <> semi)
+  "assign" <+> pretty id_ <+> equals <+> align (expr_ False e <> semi)
 
 inst_ (CondAssignment id_ ty scrut _ [(Just (BoolLit b), l),(_,r)]) = fmap Just $ do
     { syn <- Mon hdlSyn
     ; p   <- Mon $ use oports
     ; if syn == Vivado && id_ `elem` p
          then do
-              { regId <- mkUniqueId =<< Mon (extendIdentifier <*> pure Extended <*> pure id_ <*> pure "_reg")
-              ; verilogType ty <+> stringS regId <> semi <> line <>
+              { regId <- Id.suffix id_ "reg"
+              ; verilogType ty <+> pretty regId <> semi <> line <>
                 "always_comb begin" <> line <>
                 indent 2 ("if" <> parens (expr_ True scrut) <> line <>
-                            (indent 2 $ stringS regId <+> equals <+> expr_ False t <> semi) <> line <>
+                            (indent 2 $ pretty regId <+> equals <+> expr_ False t <> semi) <> line <>
                          "else" <> line <>
-                            (indent 2 $ stringS regId <+> equals <+> expr_ False f <> semi)) <> line <>
+                            (indent 2 $ pretty regId <+> equals <+> expr_ False f <> semi)) <> line <>
                 "end" <> line <>
-                "assign" <+> stringS id_ <+> equals <+> stringS regId <> semi
+                "assign" <+> pretty id_ <+> equals <+> pretty regId <> semi
               }
          else "always_comb begin" <> line <>
               indent 2 ("if" <> parens (expr_ True scrut) <> line <>
-                          (indent 2 $ stringS id_ <+> equals <+> expr_ False t <> semi) <> line <>
+                          (indent 2 $ pretty id_ <+> equals <+> expr_ False t <> semi) <> line <>
                        "else" <> line <>
-                          (indent 2 $ stringS id_ <+> equals <+> expr_ False f <> semi)) <> line <>
+                          (indent 2 $ pretty id_ <+> equals <+> expr_ False f <> semi)) <> line <>
               "end"
     }
   where
@@ -885,14 +796,14 @@ inst_ (CondAssignment id_ ty scrut scrutTy es) = fmap Just $ do
     ; p <- Mon $ use oports
     ; if syn == Vivado && id_ `elem` p
          then do
-           { regId <- mkUniqueId =<< Mon (extendIdentifier <*> pure Extended <*> pure id_ <*> pure "_reg")
-           ; verilogType ty <+> stringS regId <> semi <> line <>
+           { regId <- Id.suffix id_ "reg"
+           ; verilogType ty <+> pretty regId <> semi <> line <>
              "always_comb begin" <> line <>
              indent 2 ("case" <> parens (expr_ True scrut) <> line <>
                          (indent 2 $ vcat $ punctuate semi (conds regId es)) <> semi <> line <>
                        "endcase") <> line <>
              "end" <> line <>
-             "assign" <+> stringS id_ <+> equals <+> stringS regId <> semi
+             "assign" <+> pretty id_ <+> equals <+> pretty regId <> semi
            }
          else "always_comb begin" <> line <>
               indent 2 ("case" <> parens (expr_ True scrut) <> line <>
@@ -903,12 +814,12 @@ inst_ (CondAssignment id_ ty scrut scrutTy es) = fmap Just $ do
   where
     conds :: Identifier -> [(Maybe Literal,Expr)] -> SystemVerilogM [Doc]
     conds _ []                = return []
-    conds i [(_,e)]           = ("default" <+> colon <+> stringS i <+> equals <+> expr_ False e) <:> return []
-    conds i ((Nothing,e):_)   = ("default" <+> colon <+> stringS i <+> equals <+> expr_ False e) <:> return []
-    conds i ((Just c ,e):es') = (exprLitSV (Just (scrutTy,conSize scrutTy)) c <+> colon <+> stringS i <+> equals <+> expr_ False e) <:> conds i es'
+    conds i [(_,e)]           = ("default" <+> colon <+> pretty i <+> equals <+> expr_ False e) <:> return []
+    conds i ((Nothing,e):_)   = ("default" <+> colon <+> pretty i <+> equals <+> expr_ False e) <:> return []
+    conds i ((Just c ,e):es') = (exprLitSV (Just (scrutTy,conSize scrutTy)) c <+> colon <+> pretty i <+> equals <+> expr_ False e) <:> conds i es'
 
 inst_ (InstDecl _ _ nm lbl ps pms0) = fmap Just $
-    nest 2 (stringS nm <> params <> stringS lbl <> line <> pms2 <> semi)
+    nest 2 (pretty nm <> params <> pretty lbl <> line <> pms2 <> semi)
   where
     pms2 = case pms0 of
       NamedPortMap pms1 ->
@@ -1013,7 +924,7 @@ seq_ (Branch scrut scrutTy es) =
 
 seq_ (SeqDecl sd) = case sd of
   Assignment id_ e ->
-    stringS id_ <+> equals <+> expr_ False e <> semi
+    pretty id_ <+> equals <+> expr_ False e <> semi
 
   BlackBoxD {} ->
     fromMaybe <$> emptyDoc <*> inst_ sd
@@ -1025,7 +936,7 @@ seq_ (SeqDecl sd) = case sd of
 
 seqs :: [Seq] -> SystemVerilogM Doc
 seqs [] = emptyDoc
-seqs (SeqDecl (TickDecl id_):ds) = "//" <+> stringS id_ <> line <> seqs ds
+seqs (SeqDecl (TickDecl id_):ds) = "//" <+> pretty id_ <> line <> seqs ds
 seqs (d:ds) = seq_ d <> line <> line <> seqs ds
 
 -- | Turn a Netlist expression into a SystemVerilog expression
@@ -1033,7 +944,7 @@ expr_ :: Bool -- ^ Enclose in parentheses?
       -> Expr -- ^ Expr to convert
       -> SystemVerilogM Doc
 expr_ _ (Literal sizeM lit) = exprLitSV sizeM lit
-expr_ _ (Identifier id_ Nothing) = stringS id_
+expr_ _ (Identifier id_ Nothing) = pretty id_
 expr_ _ (Identifier id_ (Just (Indexed (CustomSP _id dataRepr _size args,dcI,fI)))) =
   case fieldTy of
     Void {} ->
@@ -1043,7 +954,7 @@ expr_ _ (Identifier id_ (Just (Indexed (CustomSP _id dataRepr _size args,dcI,fI)
  where
   (ConstrRepr' _name _n _mask _value anns, _, fieldTypes) = args !! dcI
   ranges = map range' $ bitRanges (anns !! fI)
-  range' (start, end) = stringS id_ <> brackets (int start <> ":" <> int end)
+  range' (start, end) = pretty id_ <> brackets (int start <> ":" <> int end)
   fieldTy = indexNote ($(curLoc) ++ "panic") fieldTypes fI
 
 expr_ _ (Identifier id_ (Just (Indexed (CustomProduct _id dataRepr _size _maybeFieldNames args,dcI,fI)))) =
@@ -1055,10 +966,11 @@ expr_ _ (Identifier id_ (Just (Indexed (CustomProduct _id dataRepr _size _maybeF
  where
   (anns, fieldTypes) = unzip args
   ranges = map range' $ bitRanges (anns !! fI)
-  range' (start, end) = stringS id_ <> brackets (int start <> ":" <> int end)
+  range' (start, end) = pretty id_ <> brackets (int start <> ":" <> int end)
   fieldTy = indexNote ($(curLoc) ++ "panic") fieldTypes fI
 
-expr_ _ (Identifier id_ (Just (Indexed (ty@(SP _ args),dcI,fI)))) = fromSLV argTy id_ start end
+expr_ _ (Identifier id_ (Just (Indexed (ty@(SP _ args),dcI,fI)))) =
+    fromSLV argTy (Id.toText id_) start end
   where
     argTys   = snd $ args !! dcI
     argTy    = argTys !! fI
@@ -1068,60 +980,60 @@ expr_ _ (Identifier id_ (Just (Indexed (ty@(SP _ args),dcI,fI)))) = fromSLV argT
     end      = start - argSize + 1
 
 expr_ _ (Identifier id_ (Just (Indexed (ty@(Product _ _ tys),_,fI)))) = do
-  id'<- fmap (Text.toStrict . renderOneLine) (stringS id_ <> dot <> tyName ty <> "_sel" <> int fI)
+  id'<- fmap (Text.toStrict . renderOneLine) (pretty id_ <> dot <> tyName ty <> "_sel" <> int fI)
   simpleFromSLV (tys !! fI) id'
 
 expr_ _ (Identifier id_ (Just (Indexed ((Vector _ elTy),1,0)))) = do
-  id' <- fmap (Text.toStrict . renderOneLine) (stringS id_ <> brackets (int 0))
+  id' <- fmap (Text.toStrict . renderOneLine) (pretty id_ <> brackets (int 0))
   simpleFromSLV elTy id'
 
-expr_ _ (Identifier id_ (Just (Indexed ((Vector n _),1,1)))) = stringS id_ <> brackets (int 1 <> colon <> int (n-1))
+expr_ _ (Identifier id_ (Just (Indexed ((Vector n _),1,1)))) = pretty id_ <> brackets (int 1 <> colon <> int (n-1))
 
 -- This is a "Hack", we cannot construct trees with a negative depth. This is
 -- here so that we can recognise merged RTree modifiers. See the code in
 -- @Clash.Backend.nestM@ which construct these tree modifiers.
 expr_ _ (Identifier id_ (Just (Indexed (RTree (-1) _,l,r)))) =
-  stringS id_ <> brackets (int l <> colon <> int (r-1))
+  pretty id_ <> brackets (int l <> colon <> int (r-1))
 
 expr_ _ (Identifier id_ (Just (Indexed ((RTree 0 elTy),0,0)))) = do
-  id' <- fmap (Text.toStrict . renderOneLine) (stringS id_ <> brackets (int 0))
+  id' <- fmap (Text.toStrict . renderOneLine) (pretty id_ <> brackets (int 0))
   simpleFromSLV elTy id'
 
 expr_ _ (Identifier id_ (Just (Indexed ((RTree n _),1,0)))) =
   let z = 2^(n-1)
-  in  stringS id_ <> brackets (int 0 <> colon <> int (z-1))
+  in  pretty id_ <> brackets (int 0 <> colon <> int (z-1))
 
 expr_ _ (Identifier id_ (Just (Indexed ((RTree n _),1,1)))) =
   let z  = 2^(n-1)
       z' = 2^n
-  in stringS id_ <> brackets (int z <> colon <> int (z'-1))
+  in pretty id_ <> brackets (int z <> colon <> int (z'-1))
 
 -- This is a HACK for Clash.Driver.TopWrapper.mkOutput
 -- Vector's don't have a 10'th constructor, this is just so that we can
 -- recognize the particular case
 expr_ _ (Identifier id_ (Just (Indexed ((Vector _ elTy),10,fI)))) = do
-  id' <- fmap (Text.toStrict . renderOneLine) (stringS id_ <> brackets (int fI))
+  id' <- fmap (Text.toStrict . renderOneLine) (pretty id_ <> brackets (int fI))
   simpleFromSLV elTy id'
 
 -- This is a HACK for Clash.Driver.TopWrapper.mkOutput
 -- RTree's don't have a 10'th constructor, this is just so that we can
 -- recognize the particular case
 expr_ _ (Identifier id_ (Just (Indexed ((RTree _ elTy),10,fI)))) = do
-  id' <- fmap (Text.toStrict . renderOneLine) (stringS id_ <> brackets (int fI))
+  id' <- fmap (Text.toStrict . renderOneLine) (pretty id_ <> brackets (int fI))
   simpleFromSLV elTy id'
 
-expr_ _ (Identifier id_ (Just (DC (ty@(SP _ _),_)))) = stringS id_ <> brackets (int start <> colon <> int end)
+expr_ _ (Identifier id_ (Just (DC (ty@(SP _ _),_)))) = pretty id_ <> brackets (int start <> colon <> int end)
   where
     start = typeSize ty - 1
     end   = typeSize ty - conSize ty
 
 expr_ _ (Identifier id_ (Just m@Nested {})) = case modifier 0 [] m of
-  Nothing -> stringS id_
+  Nothing -> pretty id_
   Just (mods,resTy) -> do
     nm <- Mon $ use modNm
     pkgCtx <- Mon $ use tyPkgCtx
     let prefix = if pkgCtx then emptyDoc else stringS nm <> "_types::"
-    let e = stringS id_ <> hcat (mapM (either bracketNMod bracketNMod) (reverse mods))
+    let e = pretty id_ <> hcat (mapM (either bracketNMod bracketNMod) (reverse mods))
     case resTy of
       Signed _ -> "$signed" <> parens e
       Vector {}
@@ -1145,13 +1057,13 @@ expr_ _ (Identifier id_ (Just m@Nested {})) = case modifier 0 [] m of
 expr_ _ (Identifier id_ (Just (Indexed ((Signed w),_,_))))  = do
   iw <- Mon $ use intWidth
   traceIf (iw < w) ($(curLoc) ++ "WARNING: result smaller than argument") $
-    stringS id_
+    pretty id_
 
 -- See [Note] integer projection
 expr_ _ (Identifier id_ (Just (Indexed ((Unsigned w),_,_))))  = do
   iw <- Mon $ use intWidth
   traceIf (iw < w) ($(curLoc) ++ "WARNING: result smaller than argument") $
-    stringS id_
+    pretty id_
 
 -- See [Note] mask projection
 expr_ _ (Identifier _ (Just (Indexed ((BitVector _),_,0)))) = do
@@ -1163,12 +1075,12 @@ expr_ _ (Identifier _ (Just (Indexed ((BitVector _),_,0)))) = do
 expr_ _ (Identifier id_ (Just (Indexed ((BitVector w),_,1)))) = do
   iw <- Mon $ use intWidth
   traceIf (iw < w) ($(curLoc) ++ "WARNING: result smaller than argument") $
-    stringS id_
+    pretty id_
 
 expr_ _ (Identifier id_ (Just (Sliced ((BitVector _,start,end))))) =
-  stringS id_ <> brackets (int start <> ":" <> int end)
+  pretty id_ <> brackets (int start <> ":" <> int end)
 
-expr_ _ (Identifier id_ (Just _)) = stringS id_
+expr_ _ (Identifier id_ (Just _)) = pretty id_
 
 expr_ b (DataCon _ (DC (Void {}, -1)) [e]) =  expr_ b e
 
@@ -1245,20 +1157,20 @@ expr_ _ (BlackBoxE pNm _ _ _ _ bbCtx _)
 expr_ b (BlackBoxE _ libs imps inc bs bbCtx b') =
   parenIf (b || b') (Mon (renderBlackBox libs imps inc bs bbCtx <*> pure 0))
 
-expr_ _ (DataTag Bool (Left id_))          = stringS id_ <> brackets (int 0)
+expr_ _ (DataTag Bool (Left id_))          = pretty id_ <> brackets (int 0)
 expr_ _ (DataTag Bool (Right id_))         = do
   iw <- Mon $ use intWidth
-  "$unsigned" <> parens (listBraces (sequence [braces (int (iw-1) <+> braces "1'b0"),stringS id_]))
+  "$unsigned" <> parens (listBraces (sequence [braces (int (iw-1) <+> braces "1'b0"),pretty id_]))
 
-expr_ _ (DataTag (Sum _ _) (Left id_))     = "$unsigned" <> parens (stringS id_)
-expr_ _ (DataTag (Sum _ _) (Right id_))    = "$unsigned" <> parens (stringS id_)
+expr_ _ (DataTag (Sum _ _) (Left id_))     = "$unsigned" <> parens (pretty id_)
+expr_ _ (DataTag (Sum _ _) (Right id_))    = "$unsigned" <> parens (pretty id_)
 
 expr_ _ (DataTag (Product {}) (Right _))  = do
   iw <- Mon $ use intWidth
   int iw <> "'sd0"
 
 expr_ _ (DataTag hty@(SP _ _) (Right id_)) = "$unsigned" <> parens
-                                               (stringS id_ <> brackets
+                                               (pretty id_ <> brackets
                                                (int start <> colon <> int end))
   where
     start = typeSize hty - 1
@@ -1285,11 +1197,11 @@ expr_ b (ToBv topM t e) = do
   case t of
     Vector {} -> do
       Mon (tyCache %= HashSet.insert t)
-      maybe prefix ((<> "_types::") . stringS) topM <>
+      maybe prefix ((<> "_types::") . pretty) topM <>
         tyName t <> "_to_lv" <> parens (expr_ False e)
     RTree {} -> do
       Mon (tyCache %= HashSet.insert t)
-      maybe prefix ((<> "_types::") . stringS) topM <>
+      maybe prefix ((<> "_types::") . pretty) topM <>
         tyName t <> "_to_lv" <> parens (expr_ False e)
     _ -> expr b e
 
@@ -1300,11 +1212,11 @@ expr_ b (FromBv topM t e) = do
   case t of
     Vector {} -> do
       Mon (tyCache %= HashSet.insert t)
-      maybe prefix ((<> "_types::") . stringS) topM <>
+      maybe prefix ((<> "_types::") . pretty) topM <>
         tyName t <> "_from_lv" <> parens (expr_ False e)
     RTree {} -> do
       Mon (tyCache %= HashSet.insert t)
-      maybe prefix ((<> "_types::") . stringS) topM <>
+      maybe prefix ((<> "_types::") . pretty) topM <>
         tyName t <> "_from_lv" <> parens (expr_ False e)
     _ -> expr b e
 
@@ -1339,17 +1251,17 @@ toSLV t e = case t of
   RTree _ _ -> braces (verilogTypeMark t <> "_to_lv" <> parens (expr_ False e))
   _ -> expr_ False e
 
-fromSLV :: HWType -> Identifier -> Int -> Int -> SystemVerilogM Doc
-fromSLV t@(Vector _ _) id_ start end = verilogTypeMark t <> "_from_lv" <> parens (stringS id_ <> brackets (int start <> colon <> int end))
-fromSLV t@(RTree _ _) id_ start end = verilogTypeMark t <> "_from_lv" <> parens (stringS id_ <> brackets (int start <> colon <> int end))
-fromSLV (Signed _) id_ start end = "$signed" <> parens (stringS id_ <> brackets (int start <> colon <> int end))
-fromSLV _ id_ start end = stringS id_ <> brackets (int start <> colon <> int end)
+fromSLV :: HWType -> TextS.Text -> Int -> Int -> SystemVerilogM Doc
+fromSLV t@(Vector _ _) id_ start end = verilogTypeMark t <> "_from_lv" <> parens (pretty id_ <> brackets (int start <> colon <> int end))
+fromSLV t@(RTree _ _) id_ start end = verilogTypeMark t <> "_from_lv" <> parens (pretty id_ <> brackets (int start <> colon <> int end))
+fromSLV (Signed _) id_ start end = "$signed" <> parens (pretty id_ <> brackets (int start <> colon <> int end))
+fromSLV _ id_ start end = pretty id_ <> brackets (int start <> colon <> int end)
 
-simpleFromSLV :: HWType -> Identifier -> SystemVerilogM Doc
-simpleFromSLV t@(Vector _ _) id_ = verilogTypeMark t <> "_from_lv" <> parens (stringS id_)
-simpleFromSLV t@(RTree _ _) id_ = verilogTypeMark t <> "_from_lv" <> parens (stringS id_)
-simpleFromSLV (Signed _) id_ = "$signed" <> parens (stringS id_)
-simpleFromSLV _ id_ = stringS id_
+simpleFromSLV :: HWType -> TextS.Text -> SystemVerilogM Doc
+simpleFromSLV t@(Vector _ _) id_ = verilogTypeMark t <> "_from_lv" <> parens (pretty id_)
+simpleFromSLV t@(RTree _ _) id_ = verilogTypeMark t <> "_from_lv" <> parens (pretty id_)
+simpleFromSLV (Signed _) id_ = "$signed" <> parens (pretty id_)
+simpleFromSLV _ id_ = pretty id_
 
 expFromSLV :: HWType -> SystemVerilogM Doc -> SystemVerilogM Doc
 expFromSLV t@(Vector _ _) exp_ = verilogTypeMark t <> "_from_lv" <> parens exp_
