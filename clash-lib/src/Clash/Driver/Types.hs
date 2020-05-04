@@ -178,7 +178,7 @@ defClashOpts
   , opt_componentPrefix     = Nothing
   , opt_newInlineStrat      = True
   , opt_escapedIds          = True
-  , opt_lowerCaseBasicIds   = False
+  , opt_lowerCaseBasicIds   = True
   , opt_ultra               = False
   , opt_forceUndefined      = Nothing
   , opt_checkIDir           = True
