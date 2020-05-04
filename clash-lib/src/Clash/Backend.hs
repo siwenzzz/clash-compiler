@@ -56,7 +56,7 @@ data Usage
 
 class HasIdentifierSet state => Backend state where
   -- | Initial state for state monad
-  initBackend :: Int -> HdlSyn -> Bool -> Maybe (Maybe Int) -> state
+  initBackend :: Int -> HdlSyn -> Bool -> Bool -> Maybe (Maybe Int) -> state
 
   -- | What HDL is the backend generating
   hdlKind :: state -> HDL

@@ -2066,7 +2066,7 @@ exceptT :: Applicative m => Either e a -> ExceptT e m a
 exceptT = ExceptT . pure
 
 makeHDL' :: Clash.Backend.Backend backend
-         => (Int -> HdlSyn -> Bool -> Maybe (Maybe Int) -> backend)
+         => (Int -> HdlSyn -> Bool -> Bool -> Maybe (Maybe Int) -> backend)
          -> IORef ClashOpts
          -> [FilePath]
          -> InputT GHCi ()
@@ -2107,7 +2107,7 @@ makeHDL' backend opts lst = go =<< case lst of
 
 makeHDL :: GHC.GhcMonad m
         => Clash.Backend.Backend backend
-        => (Int -> HdlSyn -> Bool -> Maybe (Maybe Int) -> backend)
+        => (Int -> HdlSyn -> Bool -> Bool -> Maybe (Maybe Int) -> backend)
         -> IORef ClashOpts
         -> [FilePath]
         -> m ()
@@ -2121,6 +2121,7 @@ makeHDL backend optsRef srcs = do
                   syn    = opt_hdlSyn opts1
                   color  = opt_color opts1
                   esc    = opt_escapedIds opts1
+                  lw     = opt_lowerCaseBasicIds opts1
                   frcUdf = opt_forceUndefined opts1
                   hdl    = Clash.Backend.hdlKind backend'
                   -- determine whether `-outputdir` was used
@@ -2134,7 +2135,7 @@ makeHDL backend optsRef srcs = do
                   idirs = importPaths dflags
                   opts2 = opts1 { opt_hdlDir = maybe outputDir Just (opt_hdlDir opts1)
                                 , opt_importPaths = idirs}
-                  backend' = backend iw syn esc frcUdf
+                  backend' = backend iw syn esc lw frcUdf
 
               checkMonoLocalBinds dflags
               checkImportDirs opts0 idirs
