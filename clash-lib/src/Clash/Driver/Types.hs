@@ -67,53 +67,54 @@ data DebugLevel
   -- ^ Show all sub-expressions on which a rewrite is attempted
   deriving (Eq,Ord,Read,Enum,Generic,Hashable)
 
-data ClashOpts = ClashOpts { opt_inlineLimit :: Int
-                           , opt_specLimit   :: Int
-                           , opt_inlineFunctionLimit :: Word
-                           , opt_inlineConstantLimit :: Word
-                           , opt_dbgLevel    :: DebugLevel
-                           , opt_dbgTransformations :: Set.Set String
-                           , opt_cachehdl    :: Bool
-                           , opt_cleanhdl    :: Bool
-                           , opt_primWarn    :: Bool
-                           , opt_color       :: OverridingBool
-                           , opt_intWidth    :: Int
-                           , opt_hdlDir      :: Maybe String
-                           -- ^ Directory to store temporary files in. Will be
-                           -- cleaned after Clash has finished executing.
-                           , opt_hdlSyn      :: HdlSyn
-                           , opt_errorExtra  :: Bool
-                           , opt_floatSupport :: Bool
-                           , opt_importPaths :: [FilePath]
-                           , opt_componentPrefix :: Maybe Text
-                           , opt_newInlineStrat :: Bool
-                           , opt_escapedIds :: Bool
-                           , opt_ultra :: Bool
-                           -- ^ Perform a high-effort compile, trading improved
-                           -- performance for potentially much longer compile
-                           -- times.
-                           --
-                           -- Name inspired by Design Compiler's /compile_ultra/
-                           -- flag.
-                           , opt_forceUndefined :: Maybe (Maybe Int)
-                           -- ^
-                           -- * /Nothing/: generate undefined's in the HDL
-                           --
-                           -- * /Just Nothing/: replace undefined's by a
-                           -- constant in the HDL; the compiler decides what's
-                           -- best
-                           --
-                           -- * /Just (Just x)/: replace undefined's by /x/ in
-                           -- the HDL
-                           , opt_checkIDir   :: Bool
-                           , opt_aggressiveXOpt :: Bool
-                           -- ^ Enable aggressive X optimization, which may
-                           -- remove undefineds from generated HDL by replaced
-                           -- with defined alternatives.
-                           , opt_inlineWFCacheLimit :: Word
-                           -- ^ At what size do we cache normalized work-free
-                           -- top-level binders.
-                           }
+data ClashOpts = ClashOpts {
+    opt_inlineLimit :: Int
+  , opt_specLimit   :: Int
+  , opt_inlineFunctionLimit :: Word
+  , opt_inlineConstantLimit :: Word
+  , opt_dbgLevel    :: DebugLevel
+  , opt_dbgTransformations :: Set.Set String
+  , opt_cachehdl    :: Bool
+  , opt_cleanhdl    :: Bool
+  , opt_primWarn    :: Bool
+  , opt_color       :: OverridingBool
+  , opt_intWidth    :: Int
+  , opt_hdlDir      :: Maybe String
+  -- ^ Directory to store temporary files in. Will be cleaned after Clash has
+  -- finished executing.
+  , opt_hdlSyn      :: HdlSyn
+  , opt_errorExtra  :: Bool
+  , opt_floatSupport :: Bool
+  , opt_importPaths :: [FilePath]
+  , opt_componentPrefix :: Maybe Text
+  , opt_newInlineStrat :: Bool
+  , opt_escapedIds :: Bool
+  -- ^ When true, allow extended identifiers. Identifiers supplied by the
+  -- user (for example, port names) might still be extended even if this option
+  -- is set to False.
+  , opt_lowerCaseBasicIds :: Bool
+  -- ^ Force all generated basic identifiers to lowercase. Among others, this
+  -- affects module and file names.
+  , opt_ultra :: Bool
+  -- ^ Perform a high-effort compile, trading improved performance for
+  -- potentially much longer compile times.
+  --
+  -- Name inspired by Design Compiler's /compile_ultra/ flag.
+  , opt_forceUndefined :: Maybe (Maybe Int)
+  -- ^
+  -- * /Nothing/: generate undefined's in the HDL
+  --
+  -- * /Just Nothing/: replace undefined's by a constant in the HDL; the
+  -- compiler decides what's best
+  --
+  -- * /Just (Just x)/: replace undefined's by /x/ in the HDL
+  , opt_checkIDir   :: Bool
+  , opt_aggressiveXOpt :: Bool
+  -- ^ Enable aggressive X optimization, which may remove undefineds from
+  -- generated HDL by replaced with defined alternatives.
+  , opt_inlineWFCacheLimit :: Word
+  -- ^ At what size do we cache normalized work-free top-level binders.
+  }
 
 instance Hashable ClashOpts where
   hashWithSalt s ClashOpts {..} =
@@ -138,6 +139,7 @@ instance Hashable ClashOpts where
     opt_componentPrefix `hashWithSalt`
     opt_newInlineStrat `hashWithSalt`
     opt_escapedIds `hashWithSalt`
+    opt_lowerCaseBasicIds `hashWithSalt`
     opt_ultra `hashWithSalt`
     opt_forceUndefined `hashWithSalt`
     opt_checkIDir `hashWithSalt`
@@ -176,6 +178,7 @@ defClashOpts
   , opt_componentPrefix     = Nothing
   , opt_newInlineStrat      = True
   , opt_escapedIds          = True
+  , opt_lowerCaseBasicIds   = False
   , opt_ultra               = False
   , opt_forceUndefined      = Nothing
   , opt_checkIDir           = True

@@ -245,11 +245,12 @@ generateHDL reprs bindingsMap hdlState primMap tcm tupTcm typeTrans eval
   go prepTime initIs (sortTop bindingsMap todo)
  where
   todo = maybe topEntities2 (uncurry (:)) mainTopEntity
-  (compNames, initIs) = genTopNames topPrefixM escpIds hdl todo
+  (compNames, initIs) = genTopNames topPrefixM escpIds lwIds hdl todo
   topEntityMap = mkVarEnv (zip (map topId todo) todo)
   topPrefixM = opt_componentPrefix opts
   hdl = hdlFromBackend (Proxy @backend)
   escpIds = opt_escapedIds opts
+  lwIds = opt_lowerCaseBasicIds opts
 
   topEntities1 = map (splitTopEntityT tcm bindingsMap) topEntities0
   -- Remove forall's used in type equality constraints
@@ -291,7 +292,7 @@ generateHDL reprs bindingsMap hdlState primMap tcm tupTcm typeTrans eval
       hdlsyn    = opt_hdlSyn opts
       forceUnd  = opt_forceUndefined opts
       hdlState' = setModName modNameT
-                $ fromMaybe (initBackend iw hdlsyn escpIds forceUnd :: backend) hdlState
+                $ fromMaybe (initBackend iw hdlsyn escpIds lwIds forceUnd :: backend) hdlState
       hdlDir    = fromMaybe "." (opt_hdlDir opts) </>
                         Clash.Backend.name hdlState' </>
                         takeWhile (/= '.') topEntityS
