@@ -1,85 +1,32 @@
-include:
-  - '/.ci/gitlab/publish.yml'
-  - '/.ci/gitlab/tests.yml'
-
 stages:
   - build
-  # TODO: add test stage to prevent cache throwouts if test failed?
-  - publish
 
-# Haddock, doctests, unittests, clash-dev testing. These are single threaded
-# tests and therefore suitable for public runners.
-tests-8.4.4:
-  extends: .tests-interruptible
-tests-8.8.3:
-  extends: .tests-interruptible
-tests-8.10.1:
-  extends: .tests-interruptible
-tests-8.6.5-singular-hidden:
-  extends: .tests-interruptible
-  variables:
-    MULTIPLE_HIDDEN: "no"
+windows-i2c:
+  stage: build
 
-# Testsuite (HDL generation and simulation). Highly parallel and memory
-# intensive, should only picked up by beefy (local) runners.
-testsuite-8.4.4:
-  extends: .testsuite-interruptible
-testsuite-8.8.3:
-  extends: .testsuite-interruptible
-testsuite-8.10.1:
-  extends: .testsuite-interruptible
-testsuite-8.6.5-singular-hidden:
-  extends: .testsuite-interruptible
-  variables:
-    MULTIPLE_HIDDEN: "no"
-
-# Tests on master. These are marked non-interruptible so we can receive e-mails
-# on failed jobs, without receiving false negatives.
-ghc-8.4.4-master:
-  extends: .tests-non-interruptible
-ghc-8.8.3-master:
-  extends: .tests-non-interruptible
-ghc-8.10.1-master:
-  extends: .tests-non-interruptible
-ghc-8.6.5-singular-hidden-master:
-  extends: .tests-non-interruptible
-  variables:
-    MULTIPLE_HIDDEN: "no"
-
-# "Publish" a release candidate
-hackage-release-candidate:
-  extends: .hackage
+  tags:
+    - shared-windows
+    - windows
+    - windows-1809
 
   variables:
-    HACKAGE_RELEASE: "no"
+    STACK_ROOT: "c:\\stack_root"
 
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule"
-    - if: $CI_PIPELINE_SOURCE == "trigger"
+  cache:
+    key: stack-root-$CI_JOB_NAME
+    paths:
+      - "c:\\stack_root"
 
-# Release new version of Clash to Hackage
-hackage-release:
-  extends: .hackage
+  script:
+    - |
+      Get-WmiObject WIN32_Pagefile | Select-Object Name, InitialSize, MaximumSize, FileSize 
+      $Pagefile = Get-WmiObject Win32_PagefileSetting | Where-Object {$_.name -eq “C:\pagefile.sys”} 
+      $Pagefile.MaximumSize = 32000
+      $Pagefile.put()
+      Get-WmiObject WIN32_Pagefile | Select-Object Name, InitialSize, MaximumSize, FileSize 
+      systeminfo /fo csv | ConvertFrom-Csv | select OS*, System*, Hotfix* | Format-List
+      certutil –addstore -enterprise –f "Root" .ci/gitlab/dst-root-ca-x3.pem
+      choco install -y haskell-stack
+      refreshenv
+      stack build -j1 --ghc-options=-j1
 
-  variables:
-    HACKAGE_RELEASE: "yes"
-
-  rules:
-    - if: '$CI_COMMIT_TAG != null' # tags
-
-# Publish a release candidate (beta/edge) to snapcraft.io/clash
-snap-beta-or-edge:
-  extends: .snap
-  variables:
-    RELEASE_CHANNEL: beta_or_edge
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule"
-    - if: $CI_PIPELINE_SOURCE == "trigger"
-
-# Publish a new version to stable channel on snapcraft.io/clash
-snap-stable:
-  extends: .snap
-  variables:
-    RELEASE_CHANNEL: stable
-  rules:
-    - if: '$CI_COMMIT_TAG != null' # tags
