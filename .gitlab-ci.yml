@@ -19,17 +19,15 @@ windows-i2c:
 
   script:
     - |
-      $pagefile = Get-WmiObject Win32_PagefileSetting | Where-Object {$_.name -eq "C:\pagefile.sys"}
-      $pagefile.delete() 
 
-      $Pagefile = Get-WmiObject Win32_PagefileSetting
-      $pagefile.Name = "C:\pagefile.sys"
-      $pagefile.Caption = "C:\pagefile.sys"
-      $pagefile.Description = "'pagefile.sys' @ C:"
-      $pagefile.SettingID ="pagefile.sys @ C:"
-      $pagefile.InitialSize = 16000
-      $pagefile.MaximumSize = 32000
-      $pagefile.put()
+      $computersys = Get-WmiObject Win32_ComputerSystem -EnableAllPrivileges;
+      $computersys.AutomaticManagedPagefile = $False;
+      $computersys.Put();
+
+      $pagefile = Get-WmiObject -Query "Select * From Win32_PageFileSetting Where Name like '%pagefile.sys'";
+      $pagefile.InitialSize = 8192;
+      $pagefile.MaximumSize = 16384;
+      $pagefile.Put();
 
       Get-WmiObject WIN32_Pagefile | Select-Object Name, InitialSize, MaximumSize, FileSize 
       systeminfo /fo csv | ConvertFrom-Csv | select OS*, System*, Hotfix* | Format-List
