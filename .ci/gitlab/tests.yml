@@ -27,6 +27,7 @@
     - unset HACKAGE_PASSWORD
     # Use either ${GHC} or if that's not set, try to detect GHC version by analyzing
     # $CI_JOB_NAME.
+    - export PATH=/opt/intelFPGA/19.1/modelsim_ase/bin/:$PATH
     - export GHC=ghc-"${GHC_VERSION:-$(echo $CI_JOB_NAME | egrep -o '[0-9]+.[0-9]+.[0-9]+')}"
     - export THREADS=$(nproc)
     - export CABAL_JOBS=$(nproc)
@@ -55,6 +56,7 @@
     - if: '$CI_COMMIT_BRANCH != "master"'
   tags:
     - local
+    - modelsim-19.1
 
 .tests-non-interruptible:
   extends: .tests
@@ -63,3 +65,4 @@
     - if: '$CI_COMMIT_BRANCH == "master"'
   tags:
     - local
+    - modelsim-19.1
