@@ -7,8 +7,7 @@ stages:
 .tests:
   stage: build_and_test
   trigger: 
-    include:
-      - local: /.ci/gitlab/pipeline.yml
+    include: /.ci/gitlab/pipeline.yml
     strategy: depend
   variables:
     UPSTREAM_CI_JOB_NAME: $CI_JOB_NAME
