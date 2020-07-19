@@ -1,6 +1,6 @@
 .tests:
   image: clashlang/clash-ci:2020-06-29
-  stage: build
+  stage: build_and_test
   timeout: 2 hours
   variables:
     MULTIPLE_HIDDEN: "no"

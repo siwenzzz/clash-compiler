@@ -1,0 +1,8 @@
+build:
+  image: alpine
+  script: echo Hello
+
+test:
+  needs: build
+  image: alpine
+  script: echo World
