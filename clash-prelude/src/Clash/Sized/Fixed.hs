@@ -936,6 +936,11 @@ instance NumFixedC rep int frac => SaturatingNum (Fixed rep int frac) where
                      0 -> unpack (resize (shiftR rR sh))
                      _ -> maxBound
 
+  satSucc w (Fixed a) = Fixed (satSucc w a)
+  {-# INLINE satSucc #-}
+  satPred  w (Fixed a) = Fixed (satPred w a)
+  {-# INLINE satPred #-}
+
 -- | Constraint for the 'divide' function
 type DivideC rep int1 frac1 int2 frac2
   = ( Resize   rep

@@ -662,6 +662,11 @@ instance KnownNat n => SaturatingNum (Signed n) where
             0 -> maxBound#
             _ -> minBoundSym#
 
+  satSucc w a = satSub w a $ fromInteger# (-1)
+  {-# INLINE satSucc #-}
+  satPred w a = satAdd w a $ fromInteger# (-1)
+  {-# INLINE satPred #-}
+
 minBoundSym# :: KnownNat n => Signed n
 minBoundSym# = minBound# +# fromInteger# 1
 
