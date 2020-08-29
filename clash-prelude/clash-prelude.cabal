@@ -382,6 +382,7 @@ test-suite unittests
       ghc-typelits-knownnat,
 
       base,
+      deepseq,
       hint          >= 0.7      && < 0.10,
       quickcheck-classes-base >= 0.6 && < 1.0,
       tasty         >= 1.2      && < 1.4,
@@ -402,6 +403,10 @@ test-suite unittests
                  Clash.Tests.TopEntityGeneration
                  Clash.Tests.Unsigned
 
+                 Clash.Tests.Laws.Enum
+                 Clash.Tests.Laws.SaturatingNum
+
+                 Test.QuickCheck.Extra
 
 benchmark benchmark-clash-prelude
   type:             exitcode-stdio-1.0
