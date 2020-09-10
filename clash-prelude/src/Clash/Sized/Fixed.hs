@@ -119,7 +119,7 @@ import Text.Read                  (Read(..))
 import Data.List                  (find)
 import Data.Proxy                 (Proxy (..))
 import Data.Ratio                 ((%), denominator, numerator)
-import Data.Typeable              (Typeable, TypeRep, typeRep)
+import Data.Typeable              (Typeable, TypeRep, typeRep, typeOf)
 import GHC.TypeLits               (KnownNat, Nat, type (+), natVal)
 import GHC.TypeLits.Extra         (Max)
 import Language.Haskell.TH        (Q, TExp, TypeQ, appT, conT, litT, mkName,
@@ -171,7 +171,6 @@ deriving instance (Typeable rep, Typeable int, Typeable frac
                   , Data (rep (int + frac))) => Data (Fixed rep int frac)
 deriving instance Eq (rep (int + frac))      => Eq (Fixed rep int frac)
 deriving instance Ord (rep (int + frac))     => Ord (Fixed rep int frac)
-deriving instance Enum (rep (int + frac))    => Enum (Fixed rep int frac)
 deriving instance Bounded (rep (int + frac)) => Bounded (Fixed rep int frac)
 deriving instance Default (rep (int + frac)) => Default (Fixed rep int frac)
 deriving instance Arbitrary (rep (int + frac)) => Arbitrary (Fixed rep int frac)
@@ -881,6 +880,73 @@ fLitR a = Fixed (fromInteger sat)
     truncated = truncate shifted :: Integer
     shifted   = a * (2 ^ (natToInteger @frac))
 
+instance ( FracFixedC rep int frac, NumFixedC rep int frac, Typeable rep,
+           Integral (rep (int + frac))
+         ) =>
+         Enum (Fixed rep int frac) where
+  succ f@(Fixed fRep) =
+    let sh  = natToNum @frac
+        err = error $ "'succ' was called on (" <> show f <> " :: "
+             <> show (typeOf f) <> ") and caused an overflow. Use 'satSucc' "
+             <> "and specify a SaturationMode if you need other behavior."
+        predMax =
+          if isSigned fRep
+          then Fixed (maxBound + fromInteger ((-1) `shiftL` sh))
+          else Fixed (maxBound - fromInteger (1 `shiftL` sh))
+        succ' =
+          if isSigned fRep
+          then Fixed (fRep - fromInteger ((-1) `shiftL` sh))
+          else Fixed (fRep + fromInteger (1 `shiftL` sh))
+    in case natToInteger @int of
+         0 -> err
+         _ -> if f > predMax then err else succ'
+
+  pred f@(Fixed fRep) =
+    let sh  = natToNum @frac
+        err = error $ "'pred' was called on (" <> show f <> " :: "
+             <> show (typeOf f) <> ") and caused a negative overflow. Use "
+             <> "'satPred' and specify a SaturationMode if you need other "
+             <> "behavior."
+        succMin =
+          if isSigned fRep
+          then Fixed (minBound - fromInteger ((-1) `shiftL` sh))
+          else Fixed (minBound + fromInteger (1 `shiftL` sh))
+        pred' =
+          if isSigned fRep
+          then Fixed (fRep + fromInteger ((-1) `shiftL` sh))
+          else Fixed (fRep - fromInteger (1 `shiftL` sh))
+    in case natToInteger @int of
+         0 -> err
+         _ -> if f < succMin then err else pred'
+
+  toEnum i =
+    let fSH  = natToNum @frac
+        res  = toInteger i `shiftL` fSH
+        rMax = toInteger (maxBound :: rep (int + frac))
+        rMin = toInteger (minBound :: rep (int + frac))
+    in if res > rMax || res < rMin
+       then error $ "'toEnum' called with value " <> show i <> " is out of "
+                 <> "bounds for "
+                 <> show (typeRep $ Proxy @(Fixed rep int frac)) <> "."
+       else Fixed (fromInteger res)
+
+  fromEnum f =
+    let res  = truncate @_ @Integer f
+        rMax = toInteger (maxBound :: Int)
+        rMin = toInteger (minBound :: Int)
+    in if res > rMax || res < rMin
+       then error $ "'fromEnum' called with value " <> show f <> " is out of "
+                 <> "bounds for Int."
+       else fromInteger res
+
+  enumFrom f@(Fixed fRep) = map Fixed $ enumFromThen fRep (unFixed $ f + 1)
+  enumFromThen (Fixed f1Rep) (Fixed f2Rep) =
+    map Fixed $ enumFromThen f1Rep f2Rep
+  enumFromTo f1@(Fixed f1Rep) f2 =
+    map Fixed $ enumFromThenTo f1Rep (unFixed $ f1 + 1) (unFixed $ f2 + 0.5)
+  enumFromThenTo f1@(Fixed f1Rep) f2@(Fixed f2Rep) f3 =
+    map Fixed $ enumFromThenTo f1Rep f2Rep (unFixed $ f3 + (f2 - f1) / 2)
+
 instance NumFixedC rep int frac => SaturatingNum (Fixed rep int frac) where
   satAdd w (Fixed a) (Fixed b) = Fixed (satAdd w a b)
   satSub  w (Fixed a) (Fixed b) = Fixed (satSub w a b)
@@ -954,7 +1020,7 @@ instance NumFixedC rep int frac => SaturatingNum (Fixed rep int frac) where
         symBound = if isSigned fRep
                    then Fixed $ minBound + 1
                    else minBound
-    in case natVal (Proxy @int) of
+    in case natToInteger @int of
          0 -> case satMode of
                 SatWrap      -> f
                 SatBound     -> minBound
