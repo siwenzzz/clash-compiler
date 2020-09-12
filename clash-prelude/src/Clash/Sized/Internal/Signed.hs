@@ -653,7 +653,7 @@ instance KnownNat n => SaturatingNum (Signed n) where
     let r        = times# a b
         (rL,rR)  = split r
         overflow = complement (reduceOr (BV.pack# (msb rR) ++# pack rL)) .|.
-                              reduceAnd (BV.pack# (msb rR) ++# pack rL)
+                   reduceAnd (BV.pack# (msb rR) ++# pack rL)
     in  case overflow of
           1 -> unpack# rR
           _ -> case msb rL of
@@ -663,7 +663,7 @@ instance KnownNat n => SaturatingNum (Signed n) where
     let r        = times# a b
         (rL,rR)  = split r
         overflow = complement (reduceOr (BV.pack# (msb rR) ++# pack rL)) .|.
-                              reduceAnd (BV.pack# (msb rR) ++# pack rL)
+                   reduceAnd (BV.pack# (msb rR) ++# pack rL)
     in  case overflow of
           1 -> unpack# rR
           _ -> fromInteger# 0
@@ -671,7 +671,7 @@ instance KnownNat n => SaturatingNum (Signed n) where
     let r        = times# a b
         (rL,rR)  = split r
         overflow = complement (reduceOr (BV.pack# (msb rR) ++# pack rL)) .|.
-                              reduceAnd (BV.pack# (msb rR) ++# pack rL)
+                   reduceAnd (BV.pack# (msb rR) ++# pack rL)
     in  case overflow of
           1 -> unpack# rR
           _ -> case msb rL of
