@@ -212,6 +212,7 @@ Library
                       Clash.Explicit.ROM.File
                       Clash.Explicit.Prelude
                       Clash.Explicit.Prelude.Safe
+                      Clash.Explicit.Reset
                       Clash.Explicit.SimIO
                       Clash.Explicit.Signal
                       Clash.Explicit.Signal.Delayed
