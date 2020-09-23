@@ -884,6 +884,8 @@ instance ( FracFixedC rep int frac, NumFixedC rep int frac, Typeable rep,
            Integral (rep (int + frac))
          ) =>
          Enum (Fixed rep int frac) where
+  -- TODO: Perhaps it's time to define plusOne and minusOne to handle isSigned
+  -- centrally.
   succ f@(Fixed fRep) =
     let sh  = natToNum @frac
         err = error $ "'succ' was called on (" <> show f <> " :: "
